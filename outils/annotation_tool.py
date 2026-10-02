@@ -26,6 +26,10 @@ class WoodDefectAnnotator:
         if self.autonome:
             self.toplevel.title("Outil d'Annotation - Défauts du Bois")
             self.toplevel.geometry("1400x900")
+            # En dessous, la colonne de gauche prend tout et il ne reste plus
+            # de place pour l'image. Elle defile, donc rien n'est perdu, mais
+            # annoter sur un timbre-poste n'a pas de sens.
+            self.toplevel.minsize(900, 560)
 
         self.classes = {
             0: "Blue_Stain",
@@ -37,7 +41,38 @@ class WoodDefectAnnotator:
             6: "Quartzity",
             7: "knot_with_crack",
             8: "resin",
-            9: "patte_de_chat"
+            9: "patte_de_chat",
+            10: "aubier_altere",
+            11: "poche_ecorce",
+            12: "noeud_pourri",
+            13: "pourriture"
+        }
+
+        #: Ce qui s'affiche a l'ecran. Les noms de `self.classes` partent dans
+        #: les annotations enregistrees, puis dans le dataset YOLO et dans le
+        #: modele : les traduire casserait tout ce qui est deja annote. On
+        #: traduit donc l'affichage seul, et le disque garde ses noms.
+        #:
+        #: Les termes sont ceux du glossaire EN 1310 deja employe dans le
+        #: depot (EN975_NOTES de build_external_dataset.py), pour qu'un nom
+        #: designe la meme chose d'un bout a l'autre du projet.
+        self.libelles = {
+            0: "Bleuissement",
+            1: "Fente",
+            2: "Nœud mort",
+            3: "Nœud sauté",
+            4: "Nœud sain",
+            5: "Moelle",
+            # Terme du jeu Kodytek sans equivalent francais etabli, et hors
+            # norme EN 975-1. Le laisser tel quel vaut mieux qu'en inventer un.
+            6: "Quartzity",
+            7: "Nœud fendu",
+            8: "Poche de résine",
+            9: "Patte de chat",
+            10: "Aubier altéré",
+            11: "Poche d'écorce",
+            12: "Nœud pourri",
+            13: "Pourriture",
         }
 
         self.colors = {
@@ -50,7 +85,11 @@ class WoodDefectAnnotator:
             6: "#808080",
             7: "#FFA500",
             8: "#800080",
-            9: "#00CED1"
+            9: "#00CED1",
+            10: "#D2B48C",
+            11: "#6B4423",
+            12: "#4B0082",
+            13: "#556B2F"
         }
 
         self.image_path = None
@@ -85,15 +124,76 @@ class WoodDefectAnnotator:
         self.auto_predict = False
         self.selected_index = None
 
+        # L'aubier sain ne se cadre pas : il suit les cernes, donc sa forme est
+        # irreguliere. La norme n'en demande que la presence et la FACE — pas
+        # la rive : X s'il est sur une face, XX sur les deux. Avec une seule
+        # camera on ne voit qu'une face : on constate donc la presence, et le
+        # moteur signale que XX reste indecidable sans la seconde vue.
+        self.aubier = tk.StringVar(value="aucun")
+
+        #: Vrai des que l'operateur a touche a l'image en cours. C'est ce qui
+        #: distingue une planche examinee et saine d'une planche seulement
+        #: survolee : la premiere merite d'etre enregistree, la seconde non.
+        self.modifiee = False
+
         self.setup_ui()
+
+    def _colonne_defilante(self, parent):
+        """Colonne de gauche qui defile, et renvoie le cadre ou tout se range.
+
+        Quatorze classes de defaut, l'aubier, la pre-annotation IA, le zoom,
+        la navigation et l'enregistrement ne tiennent pas dans 900 pixels de
+        haut : les boutons du bas sortaient de l'ecran sans aucun moyen de les
+        atteindre. Le contenu garde donc sa hauteur naturelle et c'est la vue
+        qui se deplace dessus.
+        """
+        colonne = tk.Frame(parent, width=320, bg='#f0f0f0')
+        colonne.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        colonne.pack_propagate(False)
+
+        barre = tk.Scrollbar(colonne, orient=tk.VERTICAL)
+        barre.pack(side=tk.RIGHT, fill=tk.Y)
+
+        volet = tk.Canvas(colonne, bg='#f0f0f0', highlightthickness=0,
+                          yscrollcommand=barre.set)
+        volet.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        barre.config(command=volet.yview)
+
+        dedans = tk.Frame(volet, bg='#f0f0f0')
+        fenetre = volet.create_window((0, 0), window=dedans, anchor='nw')
+
+        def ajuster(_event=None):
+            volet.configure(scrollregion=volet.bbox('all'))
+            # Sans cette largeur imposee, le cadre interieur se reduit a son
+            # contenu et les boutons cessent de remplir la colonne.
+            volet.itemconfigure(fenetre, width=volet.winfo_width())
+
+        dedans.bind('<Configure>', ajuster)
+        volet.bind('<Configure>', ajuster)
+
+        def molette(event):
+            pas = 1 if getattr(event, 'num', 0) == 5 or event.delta < 0 else -1
+            volet.yview_scroll(pas, 'units')
+
+        # La molette n'est captee que sous le pointeur : l'image a sa propre
+        # molette pour le zoom, et la lui voler rendrait l'annotation penible.
+        def saisir(_event=None):
+            for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+                volet.bind_all(sequence, molette)
+
+        def relacher(_event=None):
+            for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+                volet.unbind_all(sequence)
+
+        colonne.bind('<Enter>', saisir)
+        colonne.bind('<Leave>', relacher)
+        return dedans
 
     def setup_ui(self):
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        left_frame = tk.Frame(main_frame, width=300, bg='#f0f0f0')
-        left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
-        left_frame.pack_propagate(False)
+        left_frame = self._colonne_defilante(main_frame)
 
         title = tk.Label(left_frame, text="Outil d'Annotation", font=('Arial', 16, 'bold'), bg='#f0f0f0')
         title.pack(pady=10)
@@ -114,9 +214,9 @@ class WoodDefectAnnotator:
         self.class_buttons_frame.pack(pady=5, padx=10, fill=tk.X)
 
         self.class_buttons = {}
-        for class_id, class_name in self.classes.items():
+        for class_id in self.classes:
             btn = tk.Button(self.class_buttons_frame,
-                          text=f"{class_id}: {class_name}",
+                          text=f"{class_id}: {self.libelles[class_id]}",
                           command=lambda cid=class_id: self.select_class(cid),
                           font=('Arial', 9),
                           bg=self.colors[class_id],
@@ -142,6 +242,43 @@ class WoodDefectAnnotator:
         self.annotations_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=('Arial', 9), height=8)
         self.annotations_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.annotations_listbox.yview)
+
+        sain_frame = tk.LabelFrame(left_frame, text="Planche sans défaut",
+                                   font=('Arial', 9, 'bold'))
+        sain_frame.pack(fill=tk.X, pady=(6, 4))
+        tk.Button(sain_frame, text="Aucun défaut sur cette planche",
+                  command=self.marquer_sans_defaut,
+                  font=('Arial', 9, 'bold'), bg='#3D6E4C', fg='white',
+                  pady=6).pack(fill=tk.X, padx=4, pady=(4, 2))
+        self.lbl_sans_defaut = tk.Label(sain_frame, text="", font=('Arial', 7),
+                                        fg='#666', wraplength=250,
+                                        justify=tk.LEFT, anchor="w")
+        self.lbl_sans_defaut.pack(fill=tk.X, padx=4, pady=(0, 2))
+        tk.Label(sain_frame, font=('Arial', 7), fg='#666', justify=tk.LEFT,
+                 wraplength=250, anchor="w",
+                 text="Une planche saine est un exemple utile : elle apprend "
+                      "au modèle à ne pas inventer de défaut. Sans ce bouton, "
+                      "rien ne la distingue d'une planche non regardée."
+                 ).pack(fill=tk.X, padx=4, pady=(0, 5))
+
+        aub_frame = tk.LabelFrame(left_frame, text="Aubier sain (suffixe X / XX)",
+                                  font=('Arial', 9, 'bold'))
+        aub_frame.pack(fill=tk.X, pady=(6, 4))
+        for val, lib in (("aucun", "Aucun sur cette face"),
+                         ("une_face", "Présent sur cette face  →  X"),
+                         ("deux_faces", "Présent sur les 2 faces  →  XX")):
+            tk.Radiobutton(aub_frame, text=lib, value=val, variable=self.aubier,
+                           font=('Arial', 9), anchor="w",
+                           command=self._aubier_change).pack(fill=tk.X, padx=6)
+        tk.Label(aub_frame, font=('Arial', 7), fg='#666', justify=tk.LEFT,
+                 wraplength=250, anchor="w",
+                 text="L'aubier est la bande PÂLE le long d'un bord ; le cœur "
+                      "est plus foncé, et la limite suit les cernes donc elle "
+                      "est courbe. Planche uniformément foncée = aucun.\n\n"
+                      "Avec une seule caméra, cochez « sur cette face » : XX "
+                      "ne se vérifie qu'avec la seconde face.\n\n"
+                      "Pas de boîte à tracer. Seul l'aubier ALTÉRÉ se cadre."
+                 ).pack(fill=tk.X, padx=6, pady=(2, 5))
 
         ia_frame = tk.LabelFrame(left_frame, text="Pré-annotation IA",
                                  font=('Arial', 9, 'bold'))
@@ -293,6 +430,11 @@ class WoodDefectAnnotator:
         self.image_path = Path(file_path)
         self.annotations = []
         self.selected_index = None
+        self.modifiee = False
+        if hasattr(self, "lbl_sans_defaut"):
+            self.lbl_sans_defaut.config(text="")
+        if hasattr(self, "aubier"):
+            self.aubier.set("aucun")
         self.annotations_listbox.delete(0, tk.END)
 
         self.original_image = Image.open(self.image_path)
@@ -339,10 +481,10 @@ class WoodDefectAnnotator:
 
             if auto:
                 self._dashed_rect(draw, box, color, width=3, dash=14)
-                label = f"[IA {ann.get('confidence', 0) * 100:.0f}%] {self.classes[class_id]}"
+                label = f"[IA {ann.get('confidence', 0) * 100:.0f}%] {self.libelles[class_id]}"
             else:
                 draw.rectangle(box, outline=color, width=3)
-                label = f"{class_id}: {self.classes[class_id]}"
+                label = f"{class_id}: {self.libelles[class_id]}"
 
             draw.text((bbox['x_min'], max(0, bbox['y_min'] - 20)), label, fill=color)
 
@@ -430,6 +572,11 @@ class WoodDefectAnnotator:
         self.image_path = self.image_list[index]
         self.annotations = []
         self.selected_index = None
+        self.modifiee = False
+        if hasattr(self, "lbl_sans_defaut"):
+            self.lbl_sans_defaut.config(text="")
+        if hasattr(self, "aubier"):
+            self.aubier.set("aucun")
         self.annotations_listbox.delete(0, tk.END)
 
         self.original_image = Image.open(self.image_path)
@@ -457,23 +604,74 @@ class WoodDefectAnnotator:
         self.update_zoom_label()
         self.update_counter()
 
+    def _aubier_change(self):
+        """L'aubier est une donnee a part entiere, pas un accessoire du noeud.
+
+        Il se renseigne sur une planche sans le moindre defaut, et c'est lui
+        qui decide du suffixe X / XX. Le noter doit donc suffire a declencher
+        l'enregistrement.
+        """
+        self.modifiee = True
+        self.update_info()
+
+    def marquer_sans_defaut(self):
+        """Declare la planche examinee et saine, et l'enregistre aussitot.
+
+        Une planche propre ne se distingue autrement pas d'une planche non
+        regardee : dans les deux cas la liste est vide. Ce bouton est ce qui
+        fait la difference, et il evite d'avoir a forcer SAUVEGARDER.
+        """
+        if self.image_path is None:
+            return
+        if self.annotations and not messagebox.askyesno(
+                "Annotations presentes",
+                f"{len(self.annotations)} annotation(s) sur cette planche.\n"
+                "Les supprimer et la declarer saine ?"):
+            return
+        self.annotations = []
+        self.selected_index = None
+        self.modifiee = True
+        self.refresh_listbox()
+        self.redraw_image()
+        self._autosave()
+        self.update_info()
+        self.lbl_sans_defaut.config(
+            text=f"✓ {self.image_path.name} enregistrée sans défaut", fg="#3D6E4C")
+
     def _autosave(self):
         """Ecrit le JSON sans dialogue, avant de changer d'image.
 
         Sans cela, passer a l'image suivante perdait le travail en cours : rien
         n'etait ecrit tant qu'on n'avait pas clique sur SAUVEGARDER.
+
+        Une liste de defauts vide ne vaut pas « rien a enregistrer ». Une
+        planche propre est un exemple negatif, que `convert_json_to_yolo.py`
+        traduit en etiquette vide et qui apprend au modele a ne pas inventer
+        de defaut ; et l'aubier se renseigne meme sans le moindre noeud. Le
+        premier jet s'arretait sur `not self.annotations` et perdait les deux.
+
+        Ce qui decide d'ecrire, c'est donc d'avoir touche a l'image, pas d'y
+        avoir trouve quelque chose. Defiler sans rien faire n'ecrit rien :
+        sinon chaque planche survolee serait declaree saine sans avoir ete
+        regardee, et le jeu se remplirait de faux negatifs.
         """
-        if self.image_path is None or not self.annotations:
+        if self.image_path is None:
+            return
+        cible = self.image_path.with_suffix(".json")
+        if not self.modifiee and not cible.exists():
             return
         data = {
             "image": self.image_path.name,
             "image_size": {"width": self.image_width, "height": self.image_height},
             "annotations": self.annotations,
+            "aubier": self.aubier.get(),
+            "sans_defaut": not self.annotations,
             "classes": self.classes,
         }
         try:
-            self.image_path.with_suffix(".json").write_text(
-                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            cible.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                             encoding="utf-8")
+            self.modifiee = False
         except OSError:
             pass
 
@@ -557,6 +755,7 @@ class WoodDefectAnnotator:
 
         self.annotations.append(self._make_annotation(
             self.selected_class, x_min, y_min, x_max, y_max, source="manual"))
+        self.modifiee = True
         self.refresh_listbox()
 
         if self.current_rect:
@@ -667,6 +866,7 @@ class WoodDefectAnnotator:
                 a.pop("confidence", None)
                 n += 1
         if n:
+            self.modifiee = True
             self.refresh_listbox()
             self.redraw_image()
             self.update_info()
@@ -675,14 +875,16 @@ class WoodDefectAnnotator:
     def refresh_listbox(self):
         self.annotations_listbox.delete(0, tk.END)
         for i, a in enumerate(self.annotations, 1):
+            # Repli sur le nom enregistre si l'identifiant manque : une
+            # annotation venue d'un ancien fichier doit rester lisible.
+            nom = self.libelles.get(a.get("class_id"), a["class"])
             if a.get("source") == "auto":
                 c = a.get("confidence", 0) * 100
-                self.annotations_listbox.insert(
-                    tk.END, f"{i}. [IA {c:.0f}%] {a['class']}")
+                self.annotations_listbox.insert(tk.END, f"{i}. [IA {c:.0f}%] {nom}")
                 self.annotations_listbox.itemconfig(i - 1, fg="#8E6210")
             else:
                 self.annotations_listbox.insert(
-                    tk.END, f"{i}. {a['class']} - {a['area']}px2")
+                    tk.END, f"{i}. {nom} - {a['area']}px2")
 
     def _on_select(self, _event=None):
         sel = self.annotations_listbox.curselection()
@@ -704,6 +906,7 @@ class WoodDefectAnnotator:
             data = json.loads(jp.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
+        self.aubier.set(data.get("aubier", "aucun"))
         for a in data.get("annotations", []):
             if "bbox" in a and "class_id" in a:
                 a.setdefault("source", "manual")
@@ -717,6 +920,7 @@ class WoodDefectAnnotator:
 
         index = selection[0]
         del self.annotations[index]
+        self.modifiee = True
         self.selected_index = None
         self.refresh_listbox()
 
@@ -728,11 +932,12 @@ class WoodDefectAnnotator:
             messagebox.showerror("Erreur", "Aucune image chargée!")
             return
 
-        if not self.annotations:
-            result = messagebox.askyesno("Attention",
-                "Aucune annotation n'a été créée. Voulez-vous quand même sauvegarder?")
-            if not result:
-                return
+        if not self.annotations and not messagebox.askyesno(
+                "Planche sans défaut",
+                "Aucune annotation sur cette planche.\n\n"
+                "L'enregistrer la déclare saine — c'est un exemple utile à "
+                "l'entraînement. Continuer ?"):
+            return
 
         data = {
             "image": self.image_path.name,
@@ -741,6 +946,8 @@ class WoodDefectAnnotator:
                 "height": self.image_height
             },
             "annotations": self.annotations,
+            "aubier": self.aubier.get(),
+            "sans_defaut": not self.annotations,
             "classes": self.classes
         }
 
@@ -755,6 +962,7 @@ class WoodDefectAnnotator:
                 f"Fichier: {json_path.name}\n"
                 f"Annotations: {len(self.annotations)}")
 
+            self.modifiee = False
             self.update_info()
         except Exception as e:
             messagebox.showerror("Erreur", f"Impossible de sauvegarder:\n{str(e)}")
@@ -770,7 +978,8 @@ class WoodDefectAnnotator:
                 info += f"   à vérifier: {n_auto}\n"
             if self.image_list:
                 info += f"Position: {self.current_index + 1}/{len(self.image_list)}\n"
-            info += f"\nClasse sélectionnée:\n{self.selected_class}: {self.classes[self.selected_class]}"
+            info += (f"\nClasse sélectionnée:\n"
+                     f"{self.selected_class}: {self.libelles[self.selected_class]}")
         else:
             info = "Aucune image chargée.\n\nChargez une image pour commencer.\n(Ctrl+O)"
 

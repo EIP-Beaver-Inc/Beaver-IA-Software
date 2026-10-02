@@ -66,7 +66,11 @@ class App(tk.Tk):
         else:
             self._construire()
         self.protocol("WM_DELETE_WINDOW", self._quitter)
-        self.after(80, self._pomper)
+        #: Relance de la boucle de lecture de la console. On en garde l'ident
+        #: pour l'annuler en partant : sans cela, le rappel en attente se
+        #: déclenche sur une fenêtre déjà détruite et Tcl se plaint à chaque
+        #: fermeture.
+        self._pompe = self.after(80, self._pomper)
 
     # ---- première ouverture : où est le dépôt IA ? --------------------------
 
@@ -461,6 +465,56 @@ class App(tk.Tk):
 
     # ---- tâches : formulaire + console intégrée ----------------------------
 
+    def _colonne_defilante(self, parent: tk.Frame, largeur: int) -> tk.Frame:
+        """Colonne qui défile, et renvoie le cadre où empiler les cartes.
+
+        `pack` ne prévient pas quand il manque de place : il rogne la dernière
+        carte sans rien dire. « Données » perdait ainsi une tâche à la taille
+        par défaut et trois à la taille minimale, sans que rien ne signale
+        qu'il en existait d'autres. La barre, elle, se voit.
+        """
+        colonne = tk.Frame(parent, bg=T.CONTENT_BG, width=largeur)
+        colonne.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
+        colonne.pack_propagate(False)
+
+        barre = tk.Scrollbar(colonne, orient=tk.VERTICAL)
+        volet = tk.Canvas(colonne, bg=T.CONTENT_BG, highlightthickness=0,
+                          yscrollcommand=barre.set)
+        barre.config(command=volet.yview)
+        volet.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        dedans = tk.Frame(volet, bg=T.CONTENT_BG)
+        fenetre = volet.create_window((0, 0), window=dedans, anchor="nw")
+
+        def ajuster(_e=None):
+            volet.configure(scrollregion=volet.bbox("all"))
+            volet.itemconfigure(fenetre, width=volet.winfo_width())
+            # La barre ne s'affiche que si elle sert : sur « Entraîner », qui
+            # tient à l'aise, elle ne vient pas manger la largeur des cartes.
+            if dedans.winfo_reqheight() > volet.winfo_height():
+                if not barre.winfo_ismapped():
+                    barre.pack(side=tk.RIGHT, fill=tk.Y, before=volet)
+            elif barre.winfo_ismapped():
+                barre.pack_forget()
+
+        dedans.bind("<Configure>", ajuster)
+        volet.bind("<Configure>", ajuster)
+
+        def molette(e):
+            if dedans.winfo_reqheight() > volet.winfo_height():
+                volet.yview_scroll(
+                    1 if getattr(e, "num", 0) == 5 or e.delta < 0 else -1,
+                    "units")
+
+        # La molette n'est captée que sous le pointeur, pour laisser la
+        # console et le reste de la vue garder la leur.
+        roulettes = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+        colonne.bind("<Enter>",
+                     lambda _e: [volet.bind_all(s, molette) for s in roulettes])
+        colonne.bind("<Leave>",
+                     lambda _e: [volet.unbind_all(s) for s in roulettes])
+        return dedans
+
     def _vue_taches(self, domaine: str) -> tk.Frame:
         titres = {"roi": ("Localisation de la planche",
                           "Annoter les coins, tester le modèle ROI"),
@@ -473,9 +527,7 @@ class App(tk.Tk):
         corps = tk.Frame(f, bg=T.CONTENT_BG)
         corps.pack(fill=tk.BOTH, expand=True, padx=18, pady=14)
 
-        gauche = tk.Frame(corps, bg=T.CONTENT_BG, width=256)
-        gauche.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
-        gauche.pack_propagate(False)
+        gauche = self._colonne_defilante(corps, 256)
         for t in CATALOGUE[domaine]:
             c = tk.Frame(gauche, bg=T.CARD_BG, highlightthickness=1,
                          highlightbackground=T.CARD_BORDURE, cursor="hand2")
@@ -691,7 +743,7 @@ class App(tk.Tk):
                     self._ecrire(item)
         except queue.Empty:
             pass
-        self.after(80, self._pomper)
+        self._pompe = self.after(80, self._pomper)
 
     def _ecrire(self, texte: str, effacer: bool = False, tag: str = ""):
         if not hasattr(self, "console"):
@@ -723,4 +775,7 @@ class App(tk.Tk):
             return
         if self.proc:
             self.proc.terminate()
+        if self._pompe is not None:
+            self.after_cancel(self._pompe)
+            self._pompe = None
         self.destroy()

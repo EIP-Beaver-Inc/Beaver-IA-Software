@@ -187,6 +187,9 @@ CATALOGUE: dict[str, list[Tache]] = {
               "scripts/report_pipeline.py",
               [Param("--product-type", "Produit", "B S F P chêne · B F D hêtre",
                      "", "choix", ("", "B", "S", "F", "P", "D")),
+               Param("--essence", "Essence déclarée",
+                     "sur une ligne mono-essence, évite d'attendre le classifieur",
+                     "", "choix", ("", "chene", "hetre")),
                Param("--plank-width-mm", "Largeur réelle (mm)", "petit axe, fixe l'échelle", ""),
                Param("--faces-observed", "Faces imagées", "", "1"),
                Param("--bober-model", "Modèle défauts", "", "BOBER/model/weights/BOBERv1.5.onnx", "fichier"),
@@ -195,7 +198,8 @@ CATALOGUE: dict[str, list[Tache]] = {
                Param("--output-dir", "Dossier de sortie", "", "plank_reports", "dossier"),
                Param("--panorama", "Panorama par planche", "", "", "drapeau")],
               positionnel=Param("", "Vidéo", "0 pour la webcam", "", "fichier"),
-              note="Sans échelle ni essence identifiée, la note ne sera pas posée."),
+              note="Sans échelle la note n'est pas posée. L'essence peut être "
+                   "déclarée plutôt que reconnue si la ligne ne traite qu'un bois."),
         Tache("classer", "Classer des rapports",
               "Applique EN 975-1 à des rapports déjà produits, sans refaire "
               "l'analyse vidéo.",
@@ -232,6 +236,17 @@ CATALOGUE: dict[str, list[Tache]] = {
                Param("--defect-types", "Classes", "ex. Crack,Dead_Knot", ""),
                Param("--json", "Sortie JSON", "", "", "drapeau")],
               positionnel=Param("", "Image", "", "", "fichier")),
+        Tache("zones", "Séparer écorce, aubier et cœur",
+              "Trouve la frontière aubier/cœur, d'où se tire la largeur utile "
+              "hors aubier que la norme exige sur plots et plateaux.",
+              "outils/detect_zones.py",
+              [Param("--dossier", "Images", "", "BOBER/extracted", "dossier"),
+               Param("--sortie", "Sortie", "", "BOBER/zones", "dossier"),
+               Param("--apercu", "Aperçus à écrire", "pour juger à l'œil", "20"),
+               Param("--limite", "Plafond d'images", "", "")],
+              note="Sortie non validée : jugez les aperçus avant de vous y "
+                   "fier. La frontière est nette sur chêne frais ; elle suit la "
+                   "figure du fil sur un bois sec à veines contrastées."),
         Tache("campagnes", "Comparer deux campagnes",
               "Met deux dossiers de rapports côte à côte : défauts détectés et "
               "surtout notes attribuées.",
