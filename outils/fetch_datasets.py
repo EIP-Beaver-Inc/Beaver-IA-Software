@@ -22,7 +22,7 @@ Ces jeux pèsent jusqu'à 150 Go et n'ont rien à faire sur un SSD système. Don
 ``--dest`` une fois : le chemin est mémorisé dans ``.datasets_path`` et relu
 ensuite, y compris par ``build_external_dataset.py`` ::
 
-    python BOBER/scripts/fetch_datasets.py --dest D:/datasets_beaver kodytek
+    python outils/fetch_datasets.py --dest D:/datasets_beaver kodytek
 
 La variable d'environnement ``BEAVER_DATASETS`` fait la même chose.
 
@@ -46,10 +46,10 @@ MD5 correspond est passée. Interrompre puis relancer reprend où ça s'était a
 
 Exemples ::
 
-    python BOBER/scripts/fetch_datasets.py --dest D:/datasets_beaver --list
-    python BOBER/scripts/fetch_datasets.py kodytek --annotations-only
-    python BOBER/scripts/fetch_datasets.py kodytek --shards 1 2
-    python BOBER/scripts/fetch_datasets.py oak
+    python outils/fetch_datasets.py --dest D:/datasets_beaver --list
+    python outils/fetch_datasets.py kodytek --annotations-only
+    python outils/fetch_datasets.py kodytek --shards 1 2
+    python outils/fetch_datasets.py oak
 
 Licences : voir CREDITS.md à la racine du dépôt.
 """
@@ -453,7 +453,7 @@ def write_readme() -> None:
     lines = [
         "# datasets/",
         "",
-        "Jeux de données externes, téléchargés par `BOBER/scripts/fetch_datasets.py`.",
+        "Jeux de données externes, téléchargés par `outils/fetch_datasets.py`.",
         "**Hors dépôt git** — régénérable, et beaucoup trop lourd pour être versionné.",
         "",
         f"Emplacement : `{DATA_ROOT}`",
@@ -469,16 +469,16 @@ def write_readme() -> None:
         "## Régénérer",
         "",
         "```bash",
-        "python BOBER/scripts/fetch_datasets.py --dest D:/datasets_beaver --list",
-        "python BOBER/scripts/fetch_datasets.py kodytek --annotations-only",
-        "python BOBER/scripts/fetch_datasets.py kodytek --shards 1 2",
-        "python BOBER/scripts/fetch_datasets.py oak",
+        "python outils/fetch_datasets.py --dest D:/datasets_beaver --list",
+        "python outils/fetch_datasets.py kodytek --annotations-only",
+        "python outils/fetch_datasets.py kodytek --shards 1 2",
+        "python outils/fetch_datasets.py oak",
         "```",
         "",
         "Puis construire le jeu YOLO fusionné :",
         "",
         "```bash",
-        "python BOBER/scripts/build_external_dataset.py",
+        "python outils/build_external_dataset.py",
         "```",
         "",
         "## Attention",
@@ -582,7 +582,7 @@ def main() -> int:
     print(f"\nTout est sous {DATA_ROOT} — voir son README.md")
     print("\nÉtape suivante — construire le dataset YOLO (ne télécharge rien) :")
     flag = " --commercial" if args.commercial else ""
-    print(f"    python BOBER/scripts/build_external_dataset.py{flag}")
+    print(f"    python outils/build_external_dataset.py{flag}")
     return 0
 
 

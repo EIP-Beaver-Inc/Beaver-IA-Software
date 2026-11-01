@@ -17,16 +17,17 @@ Deux modes
 Sur la résolution
 -----------------
 Les vidéos sont en 4K et la planche y occupe 831 px de large en médiane, soit
-environ 4 px/mm pour une planche de 200 mm. Le jeu `horizontal_samples` existant
-est bien en deçà (défauts de 28 px de médiane) : il a été construit sur des
-crops réduits. Extraire depuis les vidéos récupère cette résolution perdue, ce
-qui compte directement pour EN 975-1, dont les seuils descendent à 5 mm.
+environ 4 px/mm pour une planche de 200 mm. L'ancien jeu `horizontal_samples`
+était bien en deçà (défauts de 28 px de médiane) : construit sur des crops
+réduits, il a depuis été supprimé pour cette raison même. Extraire depuis les
+vidéos récupère cette résolution perdue, ce qui compte directement pour
+EN 975-1, dont les seuils descendent à 5 mm.
 
 Exemples ::
 
-    python BOBER/scripts/extract_frames.py --stats
-    python BOBER/scripts/extract_frames.py --every 50
-    python BOBER/scripts/extract_frames.py --every 20 --min-width 600
+    python outils/extract_frames.py --stats
+    python outils/extract_frames.py --every 50
+    python outils/extract_frames.py --every 20 --min-width 600
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ from _atelier import exiger_workspace  # noqa: E402
 ROOT = exiger_workspace()
 VIDEOS = ROOT / "FactoryShot" / "Video"
 ANNOTATIONS = ROOT / "ROI" / "annotations"
-SORTIE = ROOT / "BOBER" / "extracted"
+SORTIE = ROOT / "BOBER" / "annotateImages"
 
 W = 74
 
@@ -255,7 +256,7 @@ def main() -> int:
               f"(le jeu actuel est à 384px)")
     print(f"{'=' * W}")
     print("\n  Elles n'ont PAS d'annotation de défauts — c'est l'étape suivante :")
-    print("     python BOBER/scripts/annotation_tool.py")
+    print("     python outils/annotation_tool.py")
     print("\n  Le tri n'est pas nécessaire : seules les frames marquées")
     print("  « planche visible » dans les annotations ROI ont été extraites.")
     return 0

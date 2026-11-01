@@ -13,19 +13,22 @@ Remplace l'appel direct à la commande ``yolo``, pour trois raisons :
   différentes réassocierait silencieusement chaque poids à la mauvaise classe.
   Le script compare les noms, pas leur nombre, et refuse si ça ne colle pas.
 * La taille de lot dépend de la VRAM, et se trompe de façon pénible : un
-  entraînement qui part, tourne vingt minutes et meurt sur un dépassement
-  mémoire. On la déduit de la carte détectée.
+  entraînement qui part, tourne une heure et meurt sur un dépassement mémoire
+  — en RAM système, pas en VRAM, parce que Windows reporte le surplus de la
+  carte au lieu de lever une erreur. Laissé libre, le lot est **mesuré** par
+  l'AutoBatch d'Ultralytics ; imposé, il est surveillé à la première époque.
 
 Exemples ::
 
-    python BOBER/scripts/train_bober.py --check
-    python BOBER/scripts/train_bober.py --epochs 100
-    python BOBER/scripts/train_bober.py --epochs 1 --imgsz 640 --fraction 0.02
+    python outils/train_bober.py --check
+    python outils/train_bober.py --epochs 100
+    python outils/train_bober.py --epochs 1 --imgsz 640 --fraction 0.02
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -51,11 +54,79 @@ from _atelier import exiger_workspace  # noqa: E402
 # l'outil vit dans le logiciel, les donnees dans l'espace de travail.
 ROOT = exiger_workspace()
 
-#: Taille de lot tenable selon la VRAM, à imgsz=1024 avec yolov8s.
-#: En dessous de 6 Go il faut descendre l'image, pas seulement le lot.
-LOTS_PAR_VRAM = ((24, 32), (16, 24), (12, 16), (10, 12), (8, 8), (6, 4), (0, 2))
-
 W = 74
+
+#: Part de la carte visée quand le lot n'est pas imposé. Passée à Ultralytics
+#: comme un `batch` fractionnaire, elle déclenche son AutoBatch, qui **mesure**
+#: la mémoire à plusieurs tailles de lot au lieu de l'estimer, et tient compte
+#: du nombre maximal d'objets par image — c'est lui qui pèse, pas seulement le
+#: nombre de pixels.
+#:
+#: Le barème précédent était une table VRAM → lot établie à 1024 px avec une
+#: division par deux au-delà. Elle ignorait la taille du réseau et, surtout,
+#: ne s'appliquait pas à un `--batch` explicite. C'est ce trou qui a laissé
+#: partir un lot de 6 à 1536 px sur une carte de 6 Gio : mesuré, ce réglage
+#: réserve 7,3 Gio, soit 122 % de la carte.
+FRACTION_VRAM = 0.80
+
+
+def jalonner_vram(entraineur) -> None:
+    """Remet le pic à zéro au départ de l'entraînement.
+
+    Sans ça, `max_memory_reserved` englobe le sondage d'AutoBatch, qui alloue
+    exprès jusqu'à l'échec pour trouver la limite : il a mesuré 20,6 Gio sur
+    une carte de 6, et la surveillance criait au débordement avant la première
+    image. Ce rappel se déclenche après le sondage, donc le pic qu'on lira
+    ensuite est celui de l'entraînement seul.
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
+def surveiller_vram(entraineur) -> None:
+    """Prévient à la première époque si la carte déborde.
+
+    C'est le garde-fou qui manquait, et il vaut mieux qu'une prévision : il
+    constate au lieu d'estimer, et couvre aussi bien le lot déduit que le lot
+    imposé à la main.
+
+    Au-delà de 100 %, Windows ne lève pas d'erreur : WDDM reporte le surplus
+    en mémoire système, épinglée et non paginable. L'entraînement continue,
+    plusieurs fois plus lent, et ce qui finit par manquer est la RAM des
+    workers — l'erreur tombe alors dans l'allocateur d'OpenCV, loin de sa
+    cause. La reprise automatique d'Ultralytics ne s'y déclenche pas : elle
+    attend un `torch.cuda.OutOfMemoryError`, qui n'arrive jamais.
+    """
+    import torch
+
+    if not torch.cuda.is_available() or getattr(entraineur, "_vram_dit", False):
+        return
+    total = torch.cuda.get_device_properties(0).total_memory / 2**30
+    pic = torch.cuda.max_memory_reserved() / 2**30
+    entraineur._vram_dit = True
+    lot = getattr(entraineur, "batch_size", "?")
+
+    # Dire où l'on en est, pas seulement quand c'est trop tard : un lot qui
+    # tient à 96 % tient par chance, et rien ne le distinguait d'un lot à 60 %.
+    print(f"\n  VRAM     : {pic:.1f} Gio sur {total:.1f} au pic "
+          f"({pic / total:.0%}), lot {lot} à {entraineur.args.imgsz} px")
+    if pic <= total:
+        return
+    print(f"\n{'=' * W}")
+    print(f"  LA CARTE DÉBORDE — {pic:.1f} Gio réservés pour {total:.1f} Gio")
+    print(f"{'=' * W}")
+    print(f"""
+  Lot {lot} à {entraineur.args.imgsz} px dépasse la carte de {pic - total:.1f} Gio.
+
+  Windows ne refuse pas : le surplus part en mémoire système, épinglée.
+  L'entraînement va tourner plusieurs fois plus lentement, et peut mourir
+  dans une heure sur un manque de RAM, pas de VRAM.
+
+  Arrêtez et relancez en laissant le champ « Lot » vide : la carte sera
+  alors mesurée, et le lot ajusté à {FRACTION_VRAM * 100:.0f} % de ce qu'elle a.
+""")
 
 #: Profil d'augmentation agressif, repris de l'ancien train_with_augmentation.py
 #: avant sa suppression. Sensiblement plus fort que ce que j'avais testé : il
@@ -81,15 +152,21 @@ AUGMENTATION_FORTE = {
 
 
 def device_info() -> tuple[str, str, float]:
-    """(device, description, VRAM en Go)."""
+    """(device, description, VRAM en **Gio**).
+
+    En Gio, pas en Go : c'est l'unité dans laquelle torch compte, et celle
+    qu'affiche AutoBatch. Les 6 Gio de la RTX 2060 s'annoncent 6,4 Go au
+    catalogue, et comparer une mesure en Gio à une capacité en Go laisse
+    passer 7 % de dépassement.
+    """
     try:
         import torch
     except ImportError:
         return "cpu", "torch absent", 0.0
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
-        vram = props.total_memory / 1e9
-        return "0", f"{props.name} ({vram:.1f} Go)", vram
+        vram = props.total_memory / 2**30
+        return "0", f"{props.name} ({vram:.1f} Gio)", vram
     build = getattr(torch.version, "cuda", None)
     if build is None:
         return "cpu", f"torch {torch.__version__} — variante SANS CUDA", 0.0
@@ -119,26 +196,50 @@ def conseil_cuda() -> None:
 """)
 
 
-def lot_pour(vram: float) -> int:
-    for seuil, lot in LOTS_PAR_VRAM:
-        if vram >= seuil:
-            return lot
-    return 2
-
-
 def modele_depart(classes: list[str], demande: str | None) -> str:
-    """Choisit le poids de départ, et refuse les reprises incohérentes."""
+    """Choisit le poids de départ, et refuse les reprises incohérentes.
+
+    Le critère était l'égalité stricte des listes de classes. Il écartait donc
+    les poids BOBER dès qu'on ajoutait une classe, et renvoyait sur COCO —
+    c'est-à-dire sur un réseau qui n'a jamais vu de bois. C'était trop strict :
+    ce qui rend une reprise dangereuse n'est pas qu'une classe s'ajoute à la
+    fin, c'est qu'un **indice change de sens**. Ultralytics transfère par
+    forme de tenseur sans vérifier les noms, et réassocierait alors chaque
+    poids à la mauvaise classe en silence.
+
+    Si la liste du jeu **commence par** celle du modèle, dans le même ordre,
+    aucun indice ne change de sens : les classes connues gardent le leur, les
+    nouvelles s'ajoutent après. Mesuré sur BOBERv1.6 vers un jeu à 15 classes,
+    cette reprise conserve **99,9 % des poids**, et seules 6 couches sur 355
+    — la sortie de classification — repartent de zéro.
+    """
     if demande:
         return demande
-    if classes == BOBER_ACTUEL and (ROOT / POIDS_ACTUEL).exists():
+    nom = Path(POIDS_ACTUEL).stem
+    existe = (ROOT / POIDS_ACTUEL).exists()
+    prefixe = classes[:len(BOBER_ACTUEL)] == list(BOBER_ACTUEL)
+
+    if existe and prefixe:
         print(f"  Départ   : {POIDS_ACTUEL}")
-        print("             (classes identiques à BOBERv1.5, reprise légitime)")
+        if len(classes) == len(BOBER_ACTUEL):
+            print(f"             (classes identiques à {nom}, reprise légitime)")
+        else:
+            nouvelles = classes[len(BOBER_ACTUEL):]
+            print(f"             Les {len(BOBER_ACTUEL)} classes de {nom} gardent "
+                  f"leur indice ; {len(nouvelles)} s'ajoutent après :")
+            print(f"             {', '.join(nouvelles)}.")
+            print("             Tout ce que le modèle sait du bois est conservé ;")
+            print("             seule la couche de sortie est réapprise.")
+        print(f"             Le réseau garde aussi la taille de {nom}. Pour en")
+        print("             changer, donnez Poids de départ = yolov8s.pt.")
         return str(ROOT / POIDS_ACTUEL)
-    print("  Départ   : yolov8s.pt (pré-entraîné COCO)")
-    if (ROOT / POIDS_ACTUEL).exists():
-        print("             BOBERv1.5 écarté : ses classes ne correspondent pas")
-        print("             à celles de ce jeu. Utilisez --profile bober9 au")
-        print("             build pour pouvoir repartir de ses poids.")
+
+    print("  Départ   : yolov8s.pt (pré-entraîné COCO, aucune notion de bois)")
+    if existe:
+        print(f"             {nom} écarté : ses classes ne sont pas le début de")
+        print("             celles de ce jeu. Un indice y change de sens, et")
+        print("             la reprise associerait les poids aux mauvaises")
+        print("             classes sans que rien ne le signale.")
     return "yolov8s.pt"
 
 
@@ -155,12 +256,24 @@ def main() -> int:
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--imgsz", type=int, default=1024)
     p.add_argument("--batch", type=int, default=None,
-                   help="défaut : déduit de la VRAM détectée")
+                   help="défaut : mesuré par l'AutoBatch d'Ultralytics, visée "
+                        f"{FRACTION_VRAM * 100:.0f} %% de la carte. Une valeur "
+                        "imposée n'est pas vérifiée avant le départ.")
     p.add_argument("--fraction", type=float, default=1.0,
                    help="part du jeu utilisée, pour un essai rapide")
-    p.add_argument("--name", default="bober_external")
+    p.add_argument("--name", default=None,
+                   help="nom du run (défaut : le nom du dossier du jeu)")
     p.add_argument("--device", default=None)
-    p.add_argument("--resume", action="store_true")
+    p.add_argument("--workers", type=int, default=None,
+                   help="processus de chargement d'images. Défaut : 4 sous "
+                        "Windows, où chaque worker est un processus complet "
+                        "qui réimporte torch, au lieu des 8 d'Ultralytics.")
+    p.add_argument("--resume", nargs="?", const=True, default=False,
+                   metavar="LAST.PT",
+                   help="reprend un entraînement interrompu. Sans argument, "
+                        "Ultralytics cherche le dernier last.pt sous le "
+                        "dossier courant — donnez plutôt le chemin, le "
+                        "résultat ne dépend alors plus d'où on lance.")
     p.add_argument("--check", action="store_true",
                    help="essai minimal (1 époque, 640 px, 2 %% du jeu) pour "
                         "vérifier que la chaîne tient avant d'y passer la nuit")
@@ -194,7 +307,7 @@ def main() -> int:
         resolve_data_root() / "bober_external" / "data.yaml"
     if not data.exists():
         print(f"Jeu introuvable : {data}")
-        print("  → python BOBER/scripts/build_external_dataset.py --commercial")
+        print("  → python outils/build_external_dataset.py --commercial")
         return 1
 
     cfg = yaml.safe_load(data.read_text(encoding="utf-8"))
@@ -212,30 +325,95 @@ def main() -> int:
     print(f"  Classes  : {', '.join(classes)}")
     print(f"  Matériel : {desc}")
 
-    model = modele_depart(classes, args.model)
+    # À la reprise, le réseau vient du point de contrôle : annoncer un « poids
+    # de départ » déduit des classes décrirait un choix qui n'a pas lieu.
+    if args.resume:
+        if args.resume is True:
+            # Ultralytics chercherait sous le dossier courant. On cherche sous
+            # l'espace de travail : le résultat ne dépend plus d'où on lance.
+            trouves = sorted((ROOT / "runs" / "detect").glob("*/weights/last.pt"),
+                             key=lambda q: q.stat().st_mtime, reverse=True)
+            if not trouves:
+                print("Aucun last.pt sous runs/detect/ : rien à reprendre.")
+                return 1
+            args.resume = str(trouves[0])
+        elif not Path(args.resume).exists():
+            print(f"Point de contrôle introuvable : {args.resume}")
+            return 1
+        model = args.resume
+        print(f"  Reprise  : {Path(model).parent.parent.name}/weights/last.pt")
+        print("             Époques, taux d'apprentissage et augmentations")
+        print("             viennent du point de contrôle, pas d'ici.")
+    else:
+        model = modele_depart(classes, args.model)
 
+    # Le nom du run était figé à « bober_external » : un entraînement sur vos
+    # propres planches atterrissait dans runs/detect/bober_external-4, nom qui
+    # désigne le jeu Kodytek. On le prend du dossier du jeu.
+    if not args.name:
+        args.name = data.parent.name
+
+    imgsz_voulu = args.imgsz
     if args.check:
         args.epochs, args.imgsz, args.fraction = 1, 640, 0.02
-        print("  Mode     : --check, essai minimal")
+        print("  Mode     : --check, essai minimal — 1 époque, 640 px, 2 % du")
+        print("             jeu. Les métriques en sortie seront proches de")
+        print("             zéro : c'est la chaîne qu'on valide, pas le modèle.")
 
     if device == "cpu" and not (args.force_cpu or args.check):
         conseil_cuda()
         return 1
-
-    batch = args.batch or (lot_pour(vram) if device != "cpu" else 2)
-    if args.imgsz > 1024 and vram and vram < 12:
-        batch = max(1, batch // 2)
-    print(f"  Lot      : {batch}" + ("" if args.batch else "  (déduit de la VRAM)"))
-    print(f"  Époques  : {args.epochs}   ·   image {args.imgsz} px"
-          + (f"   ·   {args.fraction:.0%} du jeu" if args.fraction < 1 else ""))
-    print(f"  Sortie   : runs/detect/{args.name}/   (rien d'existant n'est écrasé)")
-    print(f"{'=' * W}\n")
 
     try:
         from ultralytics import YOLO
     except ImportError:
         print("ultralytics absent : python -m pip install ultralytics")
         return 1
+
+    # Une reprise repart du réseau enregistré dans le point de contrôle, pas
+    # de celui qu'on déduirait des classes : c'est donc lui qu'il faut peser.
+    reseau = YOLO(args.resume if isinstance(args.resume, str) else model)
+    params = sum(q.numel() for q in reseau.model.parameters()) / 1e6
+
+    # Ultralytics prend min(cpu_count, 8), soit 8 ici. Sous Windows il n'y a
+    # pas de fork : chaque worker est un processus neuf qui réimporte torch et
+    # rouvre un contexte CUDA. Huit d'entre eux, plus la mémoire système que
+    # WDDM épingle quand la VRAM déborde, et c'est l'allocateur d'OpenCV qui
+    # échoue dans un worker — sur un bloc de 2 Mio, au bout de treize époques.
+    if args.workers is None:
+        args.workers = 4 if os.name == "nt" else 8
+
+    # Lot laissé vide : on passe une FRACTION à Ultralytics, pas un entier.
+    # Son AutoBatch mesure alors la mémoire à plusieurs tailles de lot et
+    # ajuste. Déduire le lot nous-mêmes demanderait de reproduire son calcul
+    # du nombre maximal d'objets par image — du code testé, à ne pas dupliquer.
+    if args.batch:
+        batch = args.batch
+    elif device == "cpu":
+        batch = 2
+    else:
+        batch = FRACTION_VRAM
+
+    print(f"  Réseau   : {params:.2f} M paramètres")
+    if isinstance(batch, float):
+        print(f"  Lot      : mesuré par AutoBatch, visée {batch:.0%} "
+              f"de {vram:.1f} Gio")
+    else:
+        print(f"  Lot      : {batch}   (imposé — non vérifié : laissez le champ "
+              f"vide pour\n             que la carte soit mesurée)")
+    print(f"  Workers  : {args.workers}")
+    print(f"  Époques  : {args.epochs}   ·   image {args.imgsz} px"
+          + (f"   ·   {args.fraction:.0%} du jeu" if args.fraction < 1 else ""))
+    print(f"  Sortie   : runs/detect/{args.name}/   (rien d'existant n'est écrasé)")
+    print(f"{'=' * W}\n")
+
+    # Le docstring de ce fichier promet d'éviter « un entraînement qui part,
+    # tourne vingt minutes et meurt sur un dépassement mémoire ». La promesse
+    # n'était tenue ni pour un `--batch` explicite, qui court-circuitait tout
+    # contrôle, ni pour le débordement silencieux de WDDM, qui n'est pas une
+    # erreur. Elle l'est maintenant par le constat, à la première époque.
+    reseau.add_callback("on_train_start", jalonner_vram)
+    reseau.add_callback("on_train_epoch_end", surveiller_vram)
 
     extra = {}
     if args.aug_strong:
@@ -257,11 +435,12 @@ def main() -> int:
         print("             Sur un petit jeu, les réglages par défaut")
         print("             surapprennent en quelques époques.")
 
-    results = YOLO(model).train(
+    results = reseau.train(
         data=str(data),
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=batch,
+        workers=args.workers,
         device=device,
         fraction=args.fraction,
         project=str(ROOT / "runs" / "detect"),
@@ -278,10 +457,31 @@ def main() -> int:
     print(f"{'=' * W}")
     print("\n  Pour les mettre en service, copiez-les sous un NOUVEAU numéro")
     print("  de version, sans écraser l'existant :")
-    print(f"     copy \"{best}\" BOBER\\model\\weights\\BOBERv1.6.pt")
-    print("\n  Puis réexportez en ONNX si le pipeline l'utilise, et relancez")
-    print("  les tests : python -m pytest -q")
+    # Le numéro était écrit en dur : « sans écraser l'existant » suivi du nom
+    # d'un fichier qui existe déjà. On calcule le premier numéro libre.
+    print(f"     copy \"{best}\" {_prochaine_version()}")
+    print("\n  Puis réexportez en ONNX si le pipeline l'utilise — c'est "
+          "l'export qui")
+    print(f"  fixe la taille d'entrée, donc exportez à imgsz={imgsz_voulu}, "
+          "celle de")
+    print("  l'entraînement. Un modèle entraîné à 1536 et exporté à 640 voit")
+    print("  les défauts à une autre échelle que celle qu'il a apprise.")
+    print("\n  Puis relancez les tests : python -m pytest -q")
     return 0
+
+
+def _prochaine_version() -> str:
+    """Le premier `BOBERvX.Y.pt` libre, en chemin relatif à l'espace."""
+    import re
+
+    dossier = ROOT / "BOBER" / "model" / "weights"
+    majeur, mineur = 1, 0
+    for p in dossier.glob("BOBERv*.pt") if dossier.is_dir() else []:
+        m = re.search(r"v(\d+)(?:\.(\d+))?", p.stem)
+        if m:
+            majeur, mineur = max((majeur, mineur),
+                                 (int(m.group(1)), int(m.group(2) or 0)))
+    return f"BOBER\\model\\weights\\BOBERv{majeur}.{mineur + 1}.pt"
 
 
 if __name__ == "__main__":

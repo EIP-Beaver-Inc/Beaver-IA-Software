@@ -1,7 +1,7 @@
 """
 Outil d'annotation — la colonne de gauche doit rester atteignable.
 
-Quatorze classes de défaut, l'aubier, la pré-annotation IA, le zoom, la
+Quinze classes de défaut, l'aubier, la pré-annotation IA, le zoom, la
 navigation et l'enregistrement demandent 1828 pixels de haut. La fenêtre en
 offre 880 : sans défilement, 948 pixels étaient hors d'écran, dont les deux
 boutons de l'IA, le zoom, le compteur d'images et le bandeau d'info. Rien ne
@@ -20,18 +20,31 @@ tk = pytest.importorskip("tkinter")
 
 
 @pytest.fixture(scope="module")
-def fenetre():
-    try:
-        racine = tk.Tk()
-    except tk.TclError as erreur:          # poste sans affichage
-        pytest.skip(f"Tk indisponible : {erreur}")
-    racine.geometry("1400x900")
-    racine.attributes("-alpha", 0.0)
+def fenetre(fenetre_logiciel):
+    """L'annotateur dans une fenêtre secondaire de la racine de session.
+
+    Il créait sa propre racine Tk et la détruisait en fin de module. Une
+    seconde racine ne se crée plus ensuite : Tcl échoue à lire son `init.tcl`
+    avec un « No error » révélateur, et les trente-quatre tests d'interface se
+    sautaient alors tout seuls — une suite qui se saute ne vérifie rien. Le
+    phénomène demande la capture de sortie de pytest et un certain volume de
+    tests, ce qui explique qu'il apparaissait et disparaissait selon l'ordre
+    d'exécution.
+
+    Une seule racine vit donc pour toute la session, et l'annotateur occupe
+    une `Toplevel` — qu'il accepte, le logiciel l'embarquant déjà ailleurs.
+    Détruire une fenêtre secondaire est sans conséquence.
+    """
+    secondaire = tk.Toplevel(fenetre_logiciel)
+    secondaire.attributes("-alpha", 0.0)
     from annotation_tool import WoodDefectAnnotator
-    app = WoodDefectAnnotator(racine)
-    racine.update()
-    yield app, racine
-    racine.destroy()
+    app = WoodDefectAnnotator(secondaire)
+    secondaire.update()
+    yield app, secondaire
+    try:
+        secondaire.destroy()
+    except tk.TclError:
+        pass
 
 
 def _volet(app):

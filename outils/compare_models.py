@@ -29,6 +29,9 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+# Table historique, les 9 classes de BOBERv1.6. Ce n'est plus qu'un repli :
+# les classes se découvrent dans les modèles et le jeu, voir
+# `construire_classes` — l'annotateur en propose 15 depuis.
 CLASSES = {
     0: "Blue_Stain",
     1: "Crack",
@@ -57,6 +60,7 @@ def iou_single(boxA, boxB):
     return inter / (areaA + areaB - inter)
 
 def load_gt_json(json_path):
+    """(vérités, table {id: nom}) — la table est lue dans le JSON."""
     with open(json_path, 'r') as f:
         data = json.load(f)
     gts = []
@@ -64,9 +68,14 @@ def load_gt_json(json_path):
         b = ann['bbox']
         gts.append({'class_id': ann['class_id'],
                     'box': [b['x_min'], b['y_min'], b['x_max'], b['y_max']]})
-    return gts
+    table = {int(cid): nom for cid, nom in (data.get('classes') or {}).items()}
+    for ann in data.get('annotations', []):
+        if 'class' in ann:  # les vieux JSON n'ont pas de table
+            table.setdefault(int(ann['class_id']), ann['class'])
+    return gts, table
 
 def load_gt_yolo(label_path, w, h):
+    """(vérités, table) — un .txt ne nomme rien, table vide."""
     gts = []
     if not label_path.exists():
         return gts
@@ -80,7 +89,7 @@ def load_gt_yolo(label_path, w, h):
             gts.append({'class_id': cls,
                         'box': [(xc - bw/2)*w, (yc - bh/2)*h,
                                 (xc + bw/2)*w, (yc + bh/2)*h]})
-    return gts
+    return gts, {}
 
 def image_size(img_path):
     if PIL_AVAILABLE:
@@ -89,6 +98,7 @@ def image_size(img_path):
     return 640, 640
 
 def find_gt(img_path, test_dir):
+    """(vérités, table {id: nom}) — (None, {}) sans annotation."""
     label_dirs = [
         Path(test_dir).parent / 'labels' / Path(test_dir).name,
         Path(test_dir),
@@ -101,7 +111,7 @@ def find_gt(img_path, test_dir):
     jf = img_path.with_suffix('.json')
     if jf.exists():
         return load_gt_json(jf)
-    return None
+    return None, {}
 
 def find_images(test_dir):
     exts = ('.jpg', '.jpeg', '.png', '.bmp')
@@ -115,7 +125,7 @@ def run_inference(model_path, images, conf=0.01):
     """
     Run model on all images at very low confidence to collect all raw detections.
     Returns: {img_path: [{'class_id', 'conf', 'box'}]}
-    Also returns total inference time in ms.
+    Also returns total inference time in ms, and the model class names.
     """
     model = YOLO(str(model_path))
     results = {}
@@ -134,11 +144,11 @@ def run_inference(model_path, images, conf=0.01):
                 })
         results[img] = preds
     elapsed_ms = (time.perf_counter() - t0) * 1000
-    return results, elapsed_ms
+    return results, elapsed_ms, dict(model.names)
 
-def match_preds_to_gt(preds_conf_filtered, ground_truths, iou_thresh):
+def match_preds_to_gt(preds_conf_filtered, ground_truths, iou_thresh, classes):
     """Return (tp, fp, fn) counts per class."""
-    stats = {cid: {'tp': 0, 'fp': 0, 'fn': 0} for cid in CLASSES}
+    stats = {cid: {'tp': 0, 'fp': 0, 'fn': 0} for cid in classes}
     gt_matched = [False] * len(ground_truths)
 
     for pred in sorted(preds_conf_filtered, key=lambda x: -x['conf']):
@@ -162,13 +172,13 @@ def match_preds_to_gt(preds_conf_filtered, ground_truths, iou_thresh):
 
     return stats
 
-def aggregate_stats(all_preds, all_gt, conf_thresh, iou_thresh):
+def aggregate_stats(all_preds, all_gt, conf_thresh, iou_thresh, classes):
     """Aggregate TP/FP/FN over all images at given conf+iou."""
-    totals = {cid: {'tp': 0, 'fp': 0, 'fn': 0} for cid in CLASSES}
+    totals = {cid: {'tp': 0, 'fp': 0, 'fn': 0} for cid in classes}
     for img, gts in all_gt.items():
         filtered = [p for p in all_preds[img] if p['conf'] >= conf_thresh]
-        s = match_preds_to_gt(filtered, gts, iou_thresh)
-        for cid in CLASSES:
+        s = match_preds_to_gt(filtered, gts, iou_thresh, classes)
+        for cid in classes:
             for k in ('tp', 'fp', 'fn'):
                 totals[cid][k] += s[cid][k]
     return totals
@@ -197,7 +207,7 @@ def compute_ap(precisions, recalls):
         ap += max(p_at_r) if p_at_r else 0.0
     return ap / 11
 
-def compute_full_benchmark(all_preds, all_gt, name):
+def compute_full_benchmark(all_preds, all_gt, name, classes):
     """
     Compute:
     - PR curve per class at IoU=0.5
@@ -210,10 +220,10 @@ def compute_full_benchmark(all_preds, all_gt, name):
     print(f"  Computing PR curves for {name}...")
 
     pr_curves = {}
-    for cid in CLASSES:
+    for cid in classes:
         ps, rs = [], []
         for ct in CONF_THRESHOLDS:
-            stats = aggregate_stats(all_preds, all_gt, ct, 0.5)
+            stats = aggregate_stats(all_preds, all_gt, ct, 0.5, classes)
             s = stats[cid]
             p = s['tp'] / (s['tp'] + s['fp']) if (s['tp'] + s['fp']) > 0 else 1.0
             r = s['tp'] / (s['tp'] + s['fn']) if (s['tp'] + s['fn']) > 0 else 0.0
@@ -222,20 +232,20 @@ def compute_full_benchmark(all_preds, all_gt, name):
         pr_curves[cid] = (ps, rs, CONF_THRESHOLDS)
 
     ap50_per_class = {cid: compute_ap(pr_curves[cid][0], pr_curves[cid][1])
-                      for cid in CLASSES}
+                      for cid in classes}
 
     global_f1s = []
     for ct in CONF_THRESHOLDS:
-        stats = aggregate_stats(all_preds, all_gt, ct, 0.5)
+        stats = aggregate_stats(all_preds, all_gt, ct, 0.5, classes)
         g, _ = prf1_from_stats(stats)
         global_f1s.append(g['f1'])
     best_conf_idx = int(np.argmax(global_f1s))
     best_conf = CONF_THRESHOLDS[best_conf_idx]
 
-    stats_best = aggregate_stats(all_preds, all_gt, best_conf, 0.5)
+    stats_best = aggregate_stats(all_preds, all_gt, best_conf, 0.5, classes)
     global_best, per_class_best = prf1_from_stats(stats_best)
 
-    active_classes = [cid for cid, s in aggregate_stats(all_preds, all_gt, 0.01, 0.5).items()
+    active_classes = [cid for cid, s in aggregate_stats(all_preds, all_gt, 0.01, 0.5, classes).items()
                       if s['tp'] + s['fn'] > 0]
     map50 = np.mean([ap50_per_class[cid] for cid in active_classes]) if active_classes else 0.0
 
@@ -246,7 +256,7 @@ def compute_full_benchmark(all_preds, all_gt, name):
         for cid in active_classes:
             ps, rs = [], []
             for ct in CONF_THRESHOLDS:
-                stats = aggregate_stats(all_preds, all_gt, ct, iou_t)
+                stats = aggregate_stats(all_preds, all_gt, ct, iou_t, classes)
                 s = stats[cid]
                 p = s['tp'] / (s['tp'] + s['fp']) if (s['tp'] + s['fp']) > 0 else 1.0
                 r = s['tp'] / (s['tp'] + s['fn']) if (s['tp'] + s['fn']) > 0 else 0.0
@@ -269,6 +279,31 @@ def compute_full_benchmark(all_preds, all_gt, name):
         'f1_curve': global_f1s,
     }
 
+def construire_classes(noms_a, noms_b, tables_gt, ids_vus):
+    """{id: nom} — l'union de ce que modèles et jeu connaissent.
+
+    Les tables du jeu priment sur celles des modèles, qui priment sur la
+    table historique. Tout identifiant vu sans nom devient `class_<id>` :
+    on ne plante plus, on affiche l'identifiant.
+    """
+    classes = dict(CLASSES)
+    for table in (noms_a, noms_b, *tables_gt):
+        for cid, nom in (table or {}).items():
+            classes[int(cid)] = str(nom)
+    for cid in ids_vus:
+        classes.setdefault(int(cid), f"class_{cid}")
+    return dict(sorted(classes.items()))
+
+
+def conflits_classes(*tables):
+    """{id: {noms}} pour les ids nommés différemment selon la source."""
+    par_id = {}
+    for table in tables:
+        for cid, nom in (table or {}).items():
+            par_id.setdefault(int(cid), set()).add(str(nom))
+    return {cid: noms for cid, noms in par_id.items() if len(noms) > 1}
+
+
 def bar(value, max_val=1.0, width=20):
     filled = int(value / max_val * width)
     return '█' * filled + '░' * (width - filled)
@@ -283,7 +318,7 @@ def cmp(va, vb, higher_is_better=True):
         if diff > 0.002:  return f"+{diff:.3f} (-)"
     return "  =  "
 
-def print_full_report(res_a, res_b, speed_a_ms, speed_b_ms, n_images):
+def print_full_report(res_a, res_b, speed_a_ms, speed_b_ms, n_images, classes):
     na, nb = res_a['name'], res_b['name']
 
     print()
@@ -336,13 +371,13 @@ def print_full_report(res_a, res_b, speed_a_ms, speed_b_ms, n_images):
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print(f"  {'Classe':<18} {na:>12} {'':5} {nb:>12}   Δ")
     print(f"  {'-'*60}")
-    for cid in CLASSES:
+    for cid in classes:
         if cid not in res_a['active_classes'] and cid not in res_b['active_classes']:
             continue
         va = res_a['ap50_per_class'][cid]
         vb = res_b['ap50_per_class'][cid]
         bar_a = bar(va)
-        print(f"  {CLASSES[cid]:<18} {va:>6.3f} {bar_a} {vb:>6.3f}   {cmp(va, vb, True)}")
+        print(f"  {classes[cid]:<18} {va:>6.3f} {bar_a} {vb:>6.3f}   {cmp(va, vb, True)}")
 
     print()
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -352,12 +387,12 @@ def print_full_report(res_a, res_b, speed_a_ms, speed_b_ms, n_images):
     print(f"  {'':18}  {'─'*20} │  {'─'*20}  │")
     print(f"  {'':18}  {na:>20} │  {nb:>20}  │")
     print(f"  {'-'*68}")
-    for cid in CLASSES:
+    for cid in classes:
         if cid not in res_a['active_classes'] and cid not in res_b['active_classes']:
             continue
         sa = res_a['per_class_best'].get(cid, {'f1':0,'p':0,'r':0})
         sb = res_b['per_class_best'].get(cid, {'f1':0,'p':0,'r':0})
-        print(f"  {CLASSES[cid]:<18}  {sa['f1']:>6.3f}  {sa['p']:>6.3f}  {sa['r']:>6.3f} │  {sb['f1']:>6.3f}  {sb['p']:>6.3f}  {sb['r']:>6.3f}  │ {cmp(sa['f1'], sb['f1'], True)}")
+        print(f"  {classes[cid]:<18}  {sa['f1']:>6.3f}  {sa['p']:>6.3f}  {sa['r']:>6.3f} │  {sb['f1']:>6.3f}  {sb['p']:>6.3f}  {sb['r']:>6.3f}  │ {cmp(sa['f1'], sb['f1'], True)}")
 
     print()
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -408,7 +443,7 @@ def print_full_report(res_a, res_b, speed_a_ms, speed_b_ms, n_images):
     print("╚══════════════════════════════════════════════════════════════════════╝")
     print()
 
-def save_plots(res_a, res_b, output_dir):
+def save_plots(res_a, res_b, output_dir, classes):
     if not MATPLOTLIB:
         print("  (matplotlib non disponible, pas de graphiques)")
         return
@@ -418,7 +453,7 @@ def save_plots(res_a, res_b, output_dir):
     colors_a = '#2196F3'
     colors_b = '#F44336'
 
-    active = [cid for cid in CLASSES
+    active = [cid for cid in classes
               if cid in res_a['active_classes'] or cid in res_b['active_classes']]
 
     cols = 3
@@ -435,7 +470,7 @@ def save_plots(res_a, res_b, output_dir):
                 label=f"{res_a['name']} AP={res_a['ap50_per_class'][cid]:.3f}")
         ax.plot(rb, pb, color=colors_b, linewidth=2,
                 label=f"{res_b['name']} AP={res_b['ap50_per_class'][cid]:.3f}")
-        ax.set_title(CLASSES[cid], fontsize=11)
+        ax.set_title(classes[cid], fontsize=11)
         ax.set_xlabel('Recall'); ax.set_ylabel('Precision')
         ax.set_xlim(0, 1); ax.set_ylim(0, 1.05)
         ax.legend(fontsize=8); ax.grid(alpha=0.3)
@@ -472,7 +507,7 @@ def save_plots(res_a, res_b, output_dir):
     bars_a = ax.bar(x - w/2, ap_a, w, label=res_a['name'], color=colors_a, alpha=0.85)
     bars_b = ax.bar(x + w/2, ap_b, w, label=res_b['name'], color=colors_b, alpha=0.85)
     ax.set_xticks(x)
-    ax.set_xticklabels([CLASSES[c] for c in active], rotation=30, ha='right')
+    ax.set_xticklabels([classes[c] for c in active], rotation=30, ha='right')
     ax.set_ylabel('AP@0.5'); ax.set_ylim(0, 1.05)
     ax.set_title('AP@0.5 par classe', fontweight='bold')
     ax.legend(); ax.grid(axis='y', alpha=0.3)
@@ -504,7 +539,7 @@ def save_plots(res_a, res_b, output_dir):
     plt.close()
     print(f"  {path_sum}")
 
-    class_names = [CLASSES[cid] for cid in active]
+    class_names = [classes[cid] for cid in active]
     recall_a = [res_a['per_class_best'].get(cid, {'r': 0})['r'] * 100 for cid in active]
     recall_b = [res_b['per_class_best'].get(cid, {'r': 0})['r'] * 100 for cid in active]
     x = np.arange(len(active))
@@ -531,26 +566,55 @@ def save_plots(res_a, res_b, output_dir):
     plt.close()
     print(f"  {path_dr}")
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(
         description='Benchmark complet: compare deux modèles YOLO',
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Exemples:
-  python3 compare_models.py best.pt BOBERv1.pt --test horizontal_samples
+  python3 compare_models.py best.pt BOBERv1.pt --test BOBER/annotateImages
   python3 compare_models.py a.pt b.pt --test images/val --plots --output report.json
+  python3 compare_models.py --model-a a.pt --model-b b.pt --test images/val
 """
     )
-    parser.add_argument('model_a', help='Premier modèle (.pt)')
-    parser.add_argument('model_b', help='Deuxième modèle (.pt)')
+    # Positionnels historiques, gardés pour la ligne de commande. Le formulaire
+    # du logiciel ne sait qu'envoyer des `--flag valeur`, d'où les doublons
+    # nommés — les deux formes se valent, voir `modeles_resolus`.
+    parser.add_argument('model_a', nargs='?', default=None,
+                        help='Premier modèle (.pt), ou --model-a')
+    parser.add_argument('model_b', nargs='?', default=None,
+                        help='Deuxième modèle (.pt), ou --model-b')
+    parser.add_argument('--model-a', dest='modele_a', default=None,
+                        help='Premier modèle (alternative au positionnel)')
+    parser.add_argument('--model-b', dest='modele_b', default=None,
+                        help='Deuxième modèle (alternative au positionnel)')
     parser.add_argument('--test', required=True, help='Dossier contenant les images de test')
     parser.add_argument('--iou', type=float, default=0.5, help='Seuil IoU de base (défaut: 0.5)')
     parser.add_argument('--plots', action='store_true', help='Générer les graphiques PNG')
     parser.add_argument('--plots-dir', default='comparison_plots', help='Dossier de sortie graphiques')
     parser.add_argument('--output', default=None, help='Fichier JSON de sortie')
+    return parser
+
+
+def modeles_resolus(args, parser):
+    """Les deux modèles, quelle que soit la forme donnée.
+
+    Le nommé prime sur le positionnel. Sans aucun des deux, on refuse comme
+    argparse (code 2) plutôt que d'échouer plus loin sur `None`.
+    """
+    a = args.modele_a or args.model_a
+    b = args.modele_b or args.model_b
+    if not a or not b:
+        parser.error("deux modèles sont requis : "
+                     "positionnels ou --model-a / --model-b")
+    return Path(a), Path(b)
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
-    model_a, model_b = Path(args.model_a), Path(args.model_b)
+    model_a, model_b = modeles_resolus(args, parser)
     test_dir = Path(args.test)
 
     for p in [model_a, model_b]:
@@ -563,8 +627,12 @@ Exemples:
     if not images:
         print(f"Error: no images found in {test_dir}"); sys.exit(1)
 
-    dataset = [(img, gt) for img in images
-               if (gt := find_gt(img, test_dir)) is not None]
+    dataset, tables_gt = [], []
+    for img in images:
+        gt, table = find_gt(img, test_dir)
+        if gt is not None:
+            dataset.append((img, gt))
+            tables_gt.append(table)
 
     if not dataset:
         print("Error: no annotations found (JSON or YOLO label)."); sys.exit(1)
@@ -578,20 +646,30 @@ Exemples:
     print()
 
     print(f"▶ Inférence avec {na}...")
-    preds_a, time_a = run_inference(model_a, img_list, conf=0.01)
+    preds_a, time_a, noms_a = run_inference(model_a, img_list, conf=0.01)
 
     print(f"▶ Inférence avec {nb}...")
-    preds_b, time_b = run_inference(model_b, img_list, conf=0.01)
+    preds_b, time_b, noms_b = run_inference(model_b, img_list, conf=0.01)
+
+    vus = {g['class_id'] for gts in all_gt.values() for g in gts}
+    for preds in (*preds_a.values(), *preds_b.values()):
+        vus.update(p['class_id'] for p in preds)
+    classes = construire_classes(noms_a, noms_b, tables_gt, vus)
+    print(f"\n📋  {len(classes)} classes ({len(noms_a)} connues de {na}, "
+          f"{len(noms_b)} de {nb})")
+    for cid, noms in sorted(conflits_classes(noms_a, noms_b, *tables_gt).items()):
+        print(f"  ⚠ classe {cid} : {', '.join(sorted(noms))} — "
+              f"l'appariement se fait sur l'identifiant")
 
     print()
     print("⏳ Calcul des métriques (PR curves + mAP50-95, ~1 min)...")
-    res_a = compute_full_benchmark(preds_a, all_gt, na)
-    res_b = compute_full_benchmark(preds_b, all_gt, nb)
+    res_a = compute_full_benchmark(preds_a, all_gt, na, classes)
+    res_b = compute_full_benchmark(preds_b, all_gt, nb, classes)
 
-    print_full_report(res_a, res_b, time_a, time_b, len(dataset))
+    print_full_report(res_a, res_b, time_a, time_b, len(dataset), classes)
 
     print("📈 Génération des graphiques...")
-    save_plots(res_a, res_b, args.plots_dir)
+    save_plots(res_a, res_b, args.plots_dir, classes)
     print()
 
     if args.output:
@@ -600,13 +678,13 @@ Exemples:
             na: {
                 'map50': res_a['map50'], 'map50_95': res_a['map50_95'],
                 'best_f1': res_a['best_f1'], 'best_conf': res_a['best_conf'],
-                'ap50_per_class': {CLASSES[k]: v for k, v in res_a['ap50_per_class'].items()},
+                'ap50_per_class': {classes[k]: v for k, v in res_a['ap50_per_class'].items()},
                 'speed_ms_per_img': time_a / len(dataset),
             },
             nb: {
                 'map50': res_b['map50'], 'map50_95': res_b['map50_95'],
                 'best_f1': res_b['best_f1'], 'best_conf': res_b['best_conf'],
-                'ap50_per_class': {CLASSES[k]: v for k, v in res_b['ap50_per_class'].items()},
+                'ap50_per_class': {classes[k]: v for k, v in res_b['ap50_per_class'].items()},
                 'speed_ms_per_img': time_b / len(dataset),
             },
         }

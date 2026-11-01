@@ -43,9 +43,9 @@ déjà correcte, donc il est **écarté par défaut** (`--oak-knots skip`).
 
 Exemples ::
 
-    python BOBER/scripts/build_external_dataset.py --verify
-    python BOBER/scripts/build_external_dataset.py --profile all
-    python BOBER/scripts/build_external_dataset.py --sources kodytek --limit 4000
+    python outils/build_external_dataset.py --verify
+    python outils/build_external_dataset.py --profile all
+    python outils/build_external_dataset.py --sources kodytek --limit 4000
 """
 
 from __future__ import annotations
@@ -184,7 +184,7 @@ def read_kodytek(base: Path, keep: set[str], limit: int | None):
     images = _stem_index(img_dir)
     if not images:
         print(f"  kodytek : aucune image dans {img_dir}")
-        print("            → python BOBER/scripts/fetch_datasets.py kodytek --shards 1")
+        print("            → python outils/fetch_datasets.py kodytek --shards 1")
         return [], Counter(), Counter(), []
 
     kept, skipped, malformed = [], Counter(), Counter()
@@ -606,9 +606,33 @@ def main() -> int:
     return 0
 
 
-#: Classes de BOBERv1.5, dans l'ordre exact de sa tête de détection.
+#: Les 9 classes du détecteur, dans l'ordre exact de sa tête de détection.
 BOBER_ACTUEL = PROFILES["bober9"]
-POIDS_ACTUEL = "BOBER/model/weights/BOBERv1.5.pt"
+
+
+def _poids_le_plus_recent() -> str:
+    """Le BOBER à la version la plus élevée présent dans l'espace de travail.
+
+    La version était écrite en dur (`BOBERv1.5.pt`) : le jour où v1.6 est
+    arrivé, un réentraînement à 9 classes a continué de repartir de v1.5 sans
+    que rien ne le dise, perdant une version de progrès en silence. On compare
+    les numéros et non les noms, pour que v1.10 passe après v1.9.
+    """
+    import re
+
+    dossier = ROOT / "BOBER" / "model" / "weights"
+    candidats = sorted(dossier.glob("BOBERv*.pt")) if dossier.is_dir() else []
+    if not candidats:
+        return "BOBER/model/weights/BOBERv1.5.pt"
+
+    def version(p: Path) -> tuple[int, int]:
+        m = re.search(r"v(\d+)(?:\.(\d+))?", p.stem)
+        return (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
+
+    return max(candidats, key=version).relative_to(ROOT).as_posix()
+
+
+POIDS_ACTUEL = _poids_le_plus_recent()
 
 
 def _conseil_entrainement(classes: list[str], out: Path) -> None:

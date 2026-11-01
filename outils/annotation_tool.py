@@ -45,7 +45,8 @@ class WoodDefectAnnotator:
             10: "aubier_altere",
             11: "poche_ecorce",
             12: "noeud_pourri",
-            13: "pourriture"
+            13: "pourriture",
+            14: "piqure"
         }
 
         #: Ce qui s'affiche a l'ecran. Les noms de `self.classes` partent dans
@@ -73,6 +74,7 @@ class WoodDefectAnnotator:
             11: "Poche d'écorce",
             12: "Nœud pourri",
             13: "Pourriture",
+            14: "Piqûre",
         }
 
         self.colors = {
@@ -89,7 +91,8 @@ class WoodDefectAnnotator:
             10: "#D2B48C",
             11: "#6B4423",
             12: "#4B0082",
-            13: "#556B2F"
+            13: "#556B2F",
+            14: "#2F4F4F"
         }
 
         self.image_path = None
@@ -141,7 +144,7 @@ class WoodDefectAnnotator:
     def _colonne_defilante(self, parent):
         """Colonne de gauche qui defile, et renvoie le cadre ou tout se range.
 
-        Quatorze classes de defaut, l'aubier, la pre-annotation IA, le zoom,
+        Quinze classes de defaut, l'aubier, la pre-annotation IA, le zoom,
         la navigation et l'enregistrement ne tiennent pas dans 900 pixels de
         haut : les boutons du bas sortaient de l'ecran sans aucun moyen de les
         atteindre. Le contenu garde donc sa hauteur naturelle et c'est la vue
@@ -1090,7 +1093,7 @@ def main():
 
     ap = argparse.ArgumentParser(
         description="Annotation des defauts, avec pre-annotation par un modele",
-        epilog="Exemple : python BOBER/scripts/annotation_tool.py BOBER/extracted "
+        epilog="Exemple : python outils/annotation_tool.py BOBER/annotateImages "
                "--model BOBER/model/weights/BOBERv1.6.pt --auto")
     ap.add_argument("dossier", nargs="?", help="dossier d'images a annoter")
     ap.add_argument("--model", default=None,

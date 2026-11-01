@@ -1,188 +1,301 @@
 #!/usr/bin/env python3
+"""
+Transforme les JSON de l'annotateur en jeu YOLO prêt à entraîner.
 
+Pourquoi cette étape existe
+---------------------------
+`train_bober.py` ne lit pas vos annotations : il lit un `data.yaml`. Sans
+conversion, l'option « Jeu » laissée vide le fait partir sur
+`bober_external`, c'est-à-dire les jeux Kodytek et oak téléchargés — des
+heures d'entraînement sur du bois qui n'est pas le vôtre.
+
+Ce que la version précédente ne savait pas faire
+------------------------------------------------
+Sa table de classes s'arrêtait à 8 et son `data.yaml` annonçait ``nc: 9``.
+L'annotateur en propose 15 depuis, et six d'entre elles sont déjà annotées :
+`patte_de_chat`, `piqure`, `noeud_pourri` et `pourriture` portent les
+identifiants 9, 12, 13 et 14. La conversion plantait sur un `KeyError` en
+plein comptage, après avoir recopié toutes les images, et le `data.yaml`
+qu'elle aurait écrit aurait fait refuser Ultralytics (« Label class 14 exceeds
+nc=9 »). Elle exigeait aussi deux arguments positionnels, que le bouton du
+logiciel ne lui passait pas.
+
+La table de classes n'est donc plus écrite ici : elle est **lue dans les JSON**,
+que l'annotateur y recopie à chaque enregistrement. Une seule source, celle qui
+a servi à annoter.
+
+Les planches sans défaut comptent
+---------------------------------
+Une planche saine produit un fichier d'étiquettes **vide**, et c'est voulu :
+YOLO s'en sert comme exemple de fond. Les écarter apprendrait au modèle que
+toute planche porte au moins un défaut.
+
+Exemples ::
+
+    python outils/convert_json_to_yolo.py --stats
+    python outils/convert_json_to_yolo.py
+    python outils/convert_json_to_yolo.py --train-ratio 0.85 --seed 7
+"""
+
+from __future__ import annotations
+
+import argparse
 import json
 import random
 import shutil
+import sys
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError):
+        pass
 
-def convert_json_to_yolo(json_dir, output_dir, train_ratio=0.8):
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _atelier import exiger_workspace, fichiers_annotation  # noqa: E402
+from fetch_datasets import resolve_data_root  # noqa: E402
+
+ROOT = exiger_workspace()
+SOURCE = ROOT / "BOBER" / "annotateImages"
+
+W = 74
+
+
+def charger(dossier: Path) -> tuple[list[dict], list[str], list[str]]:
+    """(planches, noms de classes, anomalies).
+
+    Chaque planche retenue porte son image, ses boîtes normalisées et les
+    identifiants de classe qu'elle contient — ce dernier point sert à la
+    répartition train/val.
     """
-    Convertit les annotations JSON en format YOLO.
+    planches: list[dict] = []
+    anomalies: list[str] = []
+    tables: dict[str, dict] = {}
 
-    Args:
-        json_dir: Dossier contenant les images et fichiers JSON
-        output_dir: Dossier de sortie pour le dataset YOLO
-        train_ratio: Ratio de données pour l'entraînement (0.8 = 80%)
-    """
-    json_dir = Path(json_dir)
-    output_dir = Path(output_dir)
+    for chemin in fichiers_annotation(dossier):
+        try:
+            d = json.loads(chemin.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            anomalies.append(f"{chemin.name} : illisible ({exc})")
+            continue
+        nom_image = d.get("image")
+        if not nom_image or "annotations" not in d:
+            anomalies.append(
+                f"{chemin.name} : ce n'est pas une annotation de planche")
+            continue
+        image = dossier / nom_image
+        if not image.exists():
+            anomalies.append(f"{chemin.name} : image absente ({nom_image})")
+            continue
+        if d.get("classes"):
+            tables[json.dumps(d["classes"], sort_keys=True)] = d["classes"]
 
-    print("=" * 70)
-    print("CONVERSION JSON → YOLO")
-    print("=" * 70)
-    print()
-
-    json_files = list(json_dir.glob("*.json"))
-    print(f"Fichiers JSON trouvés: {len(json_files)}")
-
-    if not json_files:
-        print(f"No JSON files found in {json_dir}")
-        return
-
-    print("\nCréation de la structure de dossiers...")
-
-    train_img_dir = output_dir / "images" / "train"
-    val_img_dir = output_dir / "images" / "val"
-    train_label_dir = output_dir / "labels" / "train"
-    val_label_dir = output_dir / "labels" / "val"
-
-    for dir_path in [train_img_dir, val_img_dir, train_label_dir, val_label_dir]:
-        dir_path.mkdir(parents=True, exist_ok=True)
-        print(f"  ✓ {dir_path}")
-
-    random.shuffle(json_files)
-
-    n_train = int(len(json_files) * train_ratio)
-    train_files = json_files[:n_train]
-    val_files = json_files[n_train:]
-
-    print("\nRépartition:")
-    print(f"  Train: {len(train_files)} images ({train_ratio*100:.0f}%)")
-    print(f"  Val:   {len(val_files)} images ({(1-train_ratio)*100:.0f}%)")
-    print()
-
-    classes = {
-        0: "Blue_Stain",
-        1: "Crack",
-        2: "Dead_Knot",
-        3: "Knot_missing",
-        4: "Live_Knot",
-        5: "Marrow",
-        6: "Quartzity",
-        7: "knot_with_crack",
-        8: "resin"
-    }
-
-    stats = {
-        'train': {'images': 0, 'annotations': 0, 'classes': {}},
-        'val': {'images': 0, 'annotations': 0, 'classes': {}}
-    }
-
-    def process_files(files, split):
-        """Traite une liste de fichiers pour un split donné (train/val)"""
-        img_dir = train_img_dir if split == 'train' else val_img_dir
-        label_dir = train_label_dir if split == 'train' else val_label_dir
-
-        for json_file in files:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            image_name = data['image']
-            annotations = data['annotations']
-
-            src_image = json_dir / image_name
-            if not src_image.exists():
-                print(f"Warning: image not found: {image_name}")
+        boites = []
+        for a in d["annotations"]:
+            b = a.get("bbox_normalized")
+            if b is None:
+                anomalies.append(
+                    f"{chemin.name} : boîte sans coordonnées normalisées")
                 continue
+            boites.append((int(a["class_id"]), b["x_center"], b["y_center"],
+                           b["width"], b["height"]))
+        planches.append({
+            "image": image,
+            "boites": boites,
+            "classes": {cid for cid, *_ in boites},
+        })
 
-            dst_image = img_dir / image_name
-            shutil.copy2(src_image, dst_image)
+    if len(tables) > 1:
+        raise SystemExit(
+            "Les JSON ne s'accordent pas sur la table de classes "
+            f"({len(tables)} tables différentes). Corrigez-les avant de "
+            "convertir : un même identifiant désignerait deux défauts selon "
+            "le fichier."
+        )
+    table = next(iter(tables.values()), {})
+    noms = [table[str(i)] for i in range(len(table))] if table else []
+    return planches, noms, anomalies
 
-            txt_name = Path(image_name).stem + '.txt'
-            txt_path = label_dir / txt_name
 
-            with open(txt_path, 'w') as f:
-                for ann in annotations:
-                    class_id = ann['class_id']
-                    bbox_norm = ann['bbox_normalized']
+def repartir(planches: list[dict], part_val: float,
+             graine: int) -> tuple[list[dict], list[dict]]:
+    """Répartit train/val en servant les classes rares d'abord.
 
-                    line = f"{class_id} {bbox_norm['x_center']} {bbox_norm['y_center']} {bbox_norm['width']} {bbox_norm['height']}\n"
-                    f.write(line)
+    Un simple tirage au hasard peut envoyer les quatre seules `pourriture` du
+    jeu entièrement d'un côté : la classe devient alors invisible à
+    l'entraînement, ou non mesurable en validation. On parcourt donc les
+    classes de la plus rare à la plus fréquente, et chacune place sa part en
+    validation avant que les classes abondantes ne consomment les images.
+    """
+    rng = random.Random(graine)
+    ordre = list(range(len(planches)))
+    rng.shuffle(ordre)
 
-                    stats[split]['classes'][class_id] = stats[split]['classes'].get(class_id, 0) + 1
+    frequences = Counter(cid for p in planches for cid in p["classes"])
+    en_val: set[int] = set()
 
-            stats[split]['images'] += 1
-            stats[split]['annotations'] += len(annotations)
+    for cid, total in sorted(frequences.items(), key=lambda kv: kv[1]):
+        quota = round(total * part_val) if total > 1 else 0
+        pris = sum(1 for i in en_val if cid in planches[i]["classes"])
+        for i in ordre:
+            if pris >= quota:
+                break
+            if i in en_val or cid not in planches[i]["classes"]:
+                continue
+            en_val.add(i)
+            pris += 1
 
-            print(f"  ✓ {split.upper()}: {image_name} ({len(annotations)} annotations)")
+    cible = round(len(planches) * part_val)
+    for i in ordre:
+        if len(en_val) >= cible:
+            break
+        en_val.add(i)
 
-    print("Traitement des fichiers...")
-    process_files(train_files, 'train')
-    process_files(val_files, 'val')
+    return ([planches[i] for i in ordre if i not in en_val],
+            [planches[i] for i in ordre if i in en_val])
 
-    print()
-    print("=" * 70)
-    print("STATISTIQUES")
-    print("=" * 70)
 
-    for split in ['train', 'val']:
-        print(f"\n{split.upper()}:")
-        print(f"  Images: {stats[split]['images']}")
-        print(f"  Annotations: {stats[split]['annotations']}")
-        print(f"  Moyenne annotations/image: {stats[split]['annotations'] / max(stats[split]['images'], 1):.1f}")
-        print("\n  Répartition par classe:")
-        for class_id in sorted(stats[split]['classes'].keys()):
-            count = stats[split]['classes'][class_id]
-            print(f"    {class_id} ({classes[class_id]}): {count}")
+def ecrire(planches: list[dict], sortie: Path, split: str) -> int:
+    images = sortie / "images" / split
+    etiquettes = sortie / "labels" / split
+    images.mkdir(parents=True, exist_ok=True)
+    etiquettes.mkdir(parents=True, exist_ok=True)
 
-    yaml_path = output_dir / "data.yaml"
-    yaml_content = f"""# Dataset configuration for YOLO training
-# Generated automatically
+    for p in planches:
+        shutil.copy2(p["image"], images / p["image"].name)
+        lignes = [f"{cid} {x:.6f} {y:.6f} {w:.6f} {h:.6f}"
+                  for cid, x, y, w, h in p["boites"]]
+        # Fichier vide pour une planche saine : YOLO la prend comme fond.
+        (etiquettes / (p["image"].stem + ".txt")).write_text(
+            "\n".join(lignes) + ("\n" if lignes else ""), encoding="utf-8")
+    return len(planches)
 
-path: {output_dir.absolute()}
-train: images/train
-val: images/val
 
-nc: 9
-names: ['Blue_Stain', 'Crack', 'Dead_Knot', 'Knot_missing', 'Live_Knot', 'Marrow', 'Quartzity', 'knot_with_crack', 'resin']
-"""
+def tableau(titre: str, planches: list[dict], noms: list[str]) -> None:
+    boites = Counter(cid for p in planches for cid, *_ in p["boites"])
+    saines = sum(1 for p in planches if not p["boites"])
+    total = sum(boites.values())
+    print(f"\n  {titre} — {len(planches)} planches, {total} boîtes, "
+          f"{saines} sans défaut")
+    if not total:
+        return
+    for i, nom in enumerate(noms):
+        n = boites.get(i, 0)
+        barre = "#" * min(round(n / max(total, 1) * 60), 40)
+        marque = "   <- aucune" if n == 0 else ""
+        print(f"    {i:>2} {nom:<18}{n:>6}  {barre}{marque}")
 
-    with open(yaml_path, 'w') as f:
-        f.write(yaml_content)
 
-    print()
-    print("=" * 70)
-    print("Conversion complete.")
-    print("=" * 70)
-    print(f"\nDataset créé dans: {output_dir}")
-    print(f"Fichier de configuration: {yaml_path}")
-    print()
-    print("Prochaine étape:")
-    print(f"  python3 scripts/training/fine_tune.py {yaml_path}")
-    print()
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description="Convertit les JSON de l'annotateur en jeu YOLO",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("source", nargs="?", default=None,
+                   help=f"dossier des planches annotées (défaut : {SOURCE})")
+    p.add_argument("destination", nargs="?", default=None,
+                   help="dossier du jeu YOLO (défaut : <jeux>/bober_own)")
+    p.add_argument("--train-ratio", type=float, default=0.8)
+    p.add_argument("--seed", type=int, default=42,
+                   help="graine de la répartition train/val")
+    p.add_argument("--stats", action="store_true",
+                   help="montre ce que la conversion produirait, sans rien écrire")
+    args = p.parse_args()
 
-def main():
+    source = Path(args.source) if args.source else SOURCE
+    if not source.is_dir():
+        print(f"Dossier introuvable : {source}")
+        return 1
 
-    import sys
+    print(f"\n{'=' * W}")
+    print("  CONVERSION DES ANNOTATIONS EN JEU YOLO")
+    print(f"{'=' * W}")
+    print(f"  Source   : {source}")
 
-    if len(sys.argv) < 3:
-        print("Usage: python3 convert_json_to_yolo.py <dossier_json> <dossier_sortie>")
-        print()
-        print("Arguments:")
-        print("  dossier_json   : Dossier contenant les images et fichiers JSON")
-        print("  dossier_sortie : Dossier où créer le dataset YOLO")
-        print()
-        print("Options:")
-        print("  --train-ratio  : Ratio train/val (défaut: 0.8)")
-        print()
-        print("Exemple:")
-        print("  python3 convert_json_to_yolo.py img_test/ custom_dataset/")
-        print("  python3 convert_json_to_yolo.py img_test/ custom_dataset/ --train-ratio 0.7")
-        sys.exit(1)
+    planches, noms, anomalies = charger(source)
+    if not planches:
+        print("  Aucune planche annotée trouvée.")
+        return 1
+    if not noms:
+        print("  Les JSON ne portent pas de table de classes : impossible de")
+        print("  nommer les classes du jeu. Réenregistrez-les depuis")
+        print("  l'annotateur, qui l'écrit à chaque sauvegarde.")
+        return 1
 
-    json_dir = sys.argv[1]
-    output_dir = sys.argv[2]
+    print(f"  Classes  : {len(noms)}  ({', '.join(noms)})")
+    for souci in anomalies:
+        print(f"  [!] {souci}")
 
-    train_ratio = 0.8
-    if len(sys.argv) >= 5 and sys.argv[3] == '--train-ratio':
-        train_ratio = float(sys.argv[4])
+    train, val = repartir(planches, 1.0 - args.train_ratio, args.seed)
+    tableau("TRAIN", train, noms)
+    tableau("VAL  ", val, noms)
 
-    if not Path(json_dir).exists():
-        print(f"Error: directory not found: {json_dir}")
-        sys.exit(1)
+    absentes = [noms[i] for i in range(len(noms))
+                if not any(i in p["classes"] for p in planches)]
+    if absentes:
+        print(f"\n  {len(absentes)} classes sans un seul exemple : "
+              f"{', '.join(absentes)}")
+        print("  Elles resteront dans la tête du réseau sans jamais être")
+        print("  prédites. C'est sans danger, mais elles ne servent à rien")
+        print("  tant qu'elles ne sont pas annotées.")
 
-    convert_json_to_yolo(json_dir, output_dir, train_ratio)
+    jamais_vues = [noms[i] for i in range(len(noms))
+                   if any(i in p["classes"] for p in planches)
+                   and not any(i in p["classes"] for p in train)]
+    if jamais_vues:
+        print(f"\n  [!] Absentes de l'entraînement : {', '.join(jamais_vues)}")
+        print("      Changez --seed ou annotez-en d'autres exemples.")
+
+    if args.stats:
+        print(f"\n{'=' * W}")
+        print("  --stats : rien n'a été écrit.")
+        return 0
+
+    sortie = Path(args.destination) if args.destination else \
+        resolve_data_root() / "bober_own"
+    # Le jeu précédent est mis de côté, pas écrasé : celui qui occupait
+    # `bober_own` venait d'un dossier d'images supprimé depuis, donc
+    # irreproductible. Le remplacer sans filet effacerait le seul exemplaire.
+    if sortie.exists() and any(sortie.iterdir()):
+        garde = sortie.with_name(
+            f"{sortie.name}.ancien-{datetime.now():%Y%m%d-%H%M%S}")
+        sortie.rename(garde)
+        print(f"\n  Jeu précédent conservé sous : {garde}")
+
+    n_train = ecrire(train, sortie, "train")
+    n_val = ecrire(val, sortie, "val")
+
+    yaml = sortie / "data.yaml"
+    yaml.write_text(
+        f"# Construit par convert_json_to_yolo.py depuis {source}\n"
+        f"# {datetime.now():%Y-%m-%d %H:%M} - graine {args.seed}\n"
+        f"path: {sortie.as_posix()}\n"
+        f"train: images/train\n"
+        f"val: images/val\n"
+        f"\n"
+        f"nc: {len(noms)}\n"
+        f"names:\n"
+        + "".join(f"  {i}: {nom}\n" for i, nom in enumerate(noms)),
+        encoding="utf-8")
+
+    print(f"\n{'=' * W}")
+    print(f"  {n_train} images d'entraînement, {n_val} de validation")
+    print(f"  {yaml}")
+    print(f"{'=' * W}")
+    print("\n  Entraînement, depuis le logiciel, rubrique Entraîner :")
+    print("     « Entraîner le détecteur de défauts »")
+    print(f"     en renseignant Jeu (data.yaml) = {yaml}")
+    print("\n  Les classes ne sont plus les 9 de BOBERv1.6 : l'entraînement")
+    print("  repartira de yolov8s.pt et non de vos poids actuels. C'est le")
+    print("  comportement voulu — reprendre une tête de 9 classes sur un jeu")
+    print("  de 15 réassocierait les poids aux mauvaises classes.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

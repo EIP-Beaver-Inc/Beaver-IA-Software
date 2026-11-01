@@ -39,10 +39,20 @@ from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
+# Les deux outils d'essence impriment des caracteres semi-graphiques, et la
+# console Windows sort en cp1252 : lances a la main, ils mouraient sur un
+# UnicodeEncodeError en pleine execution. Le logiciel, lui, passait deja
+# PYTHONIOENCODING=utf-8 a ses sous-processus, ce qui masquait le probleme.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError):
+        pass
+
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
-from _atelier import sur_le_chemin  # noqa: E402
+from _atelier import fichiers_annotation, sur_le_chemin  # noqa: E402
 
 # La racine n'est plus deduite de l'emplacement du script :
 # l'outil vit dans le logiciel, les donnees dans l'espace de travail.
@@ -57,7 +67,7 @@ from species_classifier import (  # noqa: E402
     compute_input,
 )
 
-SAMPLES_DIR   = ROOT / "BOBER" / "horizontal_samples"
+SAMPLES_DIR   = ROOT / "BOBER" / "annotateImages"
 CHECKPOINTS   = ROOT / "ROI"   / "checkpoints"
 FAMILY_TO_IDX = {"feuillu": 0, "resineux": 1}
 
@@ -345,7 +355,7 @@ def stratified_split(
 
 def load_records(samples_dir: Path) -> list[dict]:
     records = []
-    for jpath in sorted(samples_dir.glob("wood_*.json")):
+    for jpath in fichiers_annotation(samples_dir):
         with open(jpath) as f:
             data = json.load(f)
         if data.get("species"):

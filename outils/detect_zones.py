@@ -39,7 +39,7 @@ clartés voisines, on ne fabrique pas une frontière qui n'existe pas.
 Exemples ::
 
     python outils/detect_zones.py --apercu 20
-    python outils/detect_zones.py --dossier BOBER/extracted --sortie BOBER/zones
+    python outils/detect_zones.py --dossier BOBER/annotateImages --sortie BOBER/zones
 """
 
 from __future__ import annotations
@@ -313,7 +313,7 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description="Sépare écorce, aubier et cœur sur des planches",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    p.add_argument("--dossier", default="BOBER/extracted",
+    p.add_argument("--dossier", default="BOBER/annotateImages",
                    help="images à traiter, relatif à l'espace de travail")
     p.add_argument("--sortie", default="BOBER/zones",
                    help="où écrire les aperçus et le récapitulatif")

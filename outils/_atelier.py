@@ -50,6 +50,24 @@ def exiger_workspace() -> Path:
         raise SystemExit(1) from None
 
 
+def fichiers_annotation(dossier: Path) -> list[Path]:
+    """Les JSON d'annotation d'un dossier de planches.
+
+    Les trois outils d'essence cherchaient ``wood_*.json`` — le nom du jeu
+    `horizontal_samples`, supprimé depuis. Les planches viennent maintenant de
+    ``extract_frames.py``, qui les nomme d'après la vidéo et la frame
+    (``IMG_3656_f000061.json``). Résultat : sur 549 fichiers les outils n'en
+    voyaient que 140, et c'étaient précisément les 140 sans essence — les 125
+    labels déjà posés restaient invisibles, et l'entraînement s'arrêtait sur
+    « aucun fichier annoté ». La vue du logiciel, elle, balayait déjà tout le
+    dossier : c'est cette règle-là qui est la bonne.
+
+    ``MANIFEST.json`` est le journal d'extraction, pas une planche.
+    """
+    return [p for p in sorted(dossier.glob("*.json"))
+            if p.name != "MANIFEST.json"]
+
+
 def sur_le_chemin(*sous_dossiers: str) -> Path:
     """Ajoute des dossiers de l'espace de travail à ``sys.path``.
 

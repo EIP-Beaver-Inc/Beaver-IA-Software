@@ -28,15 +28,25 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# Les deux outils d'essence impriment des caracteres semi-graphiques, et la
+# console Windows sort en cp1252 : lances a la main, ils mouraient sur un
+# UnicodeEncodeError en pleine execution. Le logiciel, lui, passait deja
+# PYTHONIOENCODING=utf-8 a ses sous-processus, ce qui masquait le probleme.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError):
+        pass
+
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
-from _atelier import sur_le_chemin  # noqa: E402
+from _atelier import fichiers_annotation, sur_le_chemin  # noqa: E402
 
 # La racine n'est plus deduite de l'emplacement du script :
 # l'outil vit dans le logiciel, les donnees dans l'espace de travail.
 ROOT = sur_le_chemin("ROI/scripts")
-SAMPLES_DIR = ROOT / "BOBER" / "horizontal_samples"
+SAMPLES_DIR = ROOT / "BOBER" / "annotateImages"
 BOBER_DIR   = ROOT / "BOBER"
 
 CLASS_NAMES = [
@@ -228,13 +238,14 @@ def main() -> None:
     samples_dir = Path(args.samples_dir)
     out_root    = Path(args.out_dir)
 
-    json_files = sorted(samples_dir.glob("wood_*.json"))
+    json_files = fichiers_annotation(samples_dir)
     if not json_files:
-        print(f"Erreur: aucun fichier wood_*.json dans {samples_dir}")
+        print(f"Erreur: aucune annotation JSON dans {samples_dir}")
         sys.exit(1)
 
     by_family: dict[str, list[dict]] = {"resineux": [], "feuillu": []}
     unannotated = 0
+    hors_famille = 0
 
     for jpath in json_files:
         with open(jpath) as f:
@@ -242,6 +253,13 @@ def main() -> None:
         family = data.get("wood_family", "")
         if family in by_family:
             by_family[family].append(data)
+        elif data.get("species"):
+            # Labellisée, mais ni feuillu ni résineux : « autre » (bois hors
+            # catalogue) ou « unknown ». Elle n'entre dans aucun des deux jeux
+            # par famille, et ce n'est pas une annotation manquante — l'ancien
+            # comptage la rangeait avec les non annotées et renvoyait annoter
+            # ce qui l'était déjà.
+            hors_famille += 1
         else:
             unannotated += 1
 
@@ -249,6 +267,10 @@ def main() -> None:
     print(f"  Total JSONs  : {len(json_files)}")
     print(f"  Résineux     : {len(by_family['resineux'])}")
     print(f"  Feuillus     : {len(by_family['feuillu'])}")
+    if hors_famille:
+        print(f"  Hors famille : {hors_famille}  "
+              f"(autre / unknown — gardées pour le classifieur, "
+              f"hors jeux par famille)")
     if unannotated:
         print(f"  Non annotés  : {unannotated}  "
               f"(lancez d'abord : python3 annotate_species.py)")
@@ -271,9 +293,9 @@ def main() -> None:
                               args.val_split, args.seed)
 
     print("\nDatasets prêts.")
-    print("Entraînez avec :")
-    print("  ./BOBER/run_train_resineux.sh")
-    print("  ./BOBER/run_train_feuillus.sh\n")
+    print("Entraînez depuis le logiciel Beaver, rubrique Entraîner :")
+    print("  « Entraîner le détecteur résineux »")
+    print("  « Entraîner le détecteur feuillus »\n")
 
 
 if __name__ == "__main__":

@@ -9,10 +9,19 @@ import json
 import sys
 from pathlib import Path
 
+# La legende est un cadre en caracteres semi-graphiques, et la console Windows
+# sort en cp1252 : sans ce passage en UTF-8, `--list` et le premier affichage
+# de la legende mouraient sur un UnicodeEncodeError avant d'avoir rien montre.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError):
+        pass
+
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
-from _atelier import sur_le_chemin  # noqa: E402
+from _atelier import fichiers_annotation, sur_le_chemin  # noqa: E402
 
 # La racine n'est plus deduite de l'emplacement du script :
 # l'outil vit dans le logiciel, les donnees dans l'espace de travail.
@@ -20,7 +29,7 @@ ROOT = sur_le_chemin("ROI/scripts")
 
 from species_classifier import FAMILY_MAP, SPECIES_LIST  # noqa: E402
 
-SAMPLES_DIR = ROOT / "BOBER" / "horizontal_samples"
+SAMPLES_DIR = ROOT / "BOBER" / "annotateImages"
 
 _ALIASES: dict[str, str] = {
     "d":   "douglas",
@@ -35,19 +44,29 @@ _ALIASES: dict[str, str] = {
     "pe":  "peuplier",
     "no":  "noyer",
     "mr":  "merisier",
+    # « autre » dit que la planche est du bois mais aucune des douze essences
+    # ci-dessus : un exotique, un mélange, une planche que personne ne nomme.
+    # Elle reste dans le jeu. « unknown », lui, dit qu'on n'a pas tranché.
+    "a":   "autre",
     "u":   "unknown",
     "?":   "unknown",
     "s":   None,
     "q":   "QUIT",
 }
 
+# La colonne de gauche était à 13 caractères, et « pin_sylvestre (ps) » en fait
+# 18 : deux lignes sur six crevaient le cadre. Elle est maintenant dimensionnée
+# sur le plus long libellé.
+_L, _R = 22, 32          # largeurs intérieures des deux colonnes du cadre
+
 
 def _print_legend() -> None:
-    print("\n  ┌──────────────────────────────────────────────┐")
-    print("  │  ESSENCES DISPONIBLES                        │")
-    print("  ├─────────────┬────────────────────────────────┤")
-    print("  │  Résineux   │  Feuillus                      │")
-    print("  ├─────────────┼────────────────────────────────┤")
+    pleine = _L + _R - 1
+    print("\n  ┌" + "─" * (_L + 1 + _R) + "┐")
+    print(f"  │  {'ESSENCES DISPONIBLES':<{pleine}}│")
+    print("  ├" + "─" * _L + "┬" + "─" * _R + "┤")
+    print(f"  │  {'Résineux':<20}│  {'Feuillus':<30}│")
+    print("  ├" + "─" * _L + "┼" + "─" * _R + "┤")
     for rez, feu in [
         ("douglas (d)",       "chene (ch)"),
         ("pin_sylvestre (ps)","hetre (he)"),
@@ -56,10 +75,11 @@ def _print_legend() -> None:
         ("meleze (me)",       "noyer (no)"),
         ("pin_maritime (pm)", "merisier (mr)"),
     ]:
-        print(f"  │  {rez:<13}│  {feu:<30}│")
-    print("  ├─────────────┴────────────────────────────────┤")
-    print("  │  unknown (u / ?)  |  skip (s)  |  quit (q)  │")
-    print("  └──────────────────────────────────────────────┘\n")
+        print(f"  │  {rez:<20}│  {feu:<30}│")
+    print("  ├" + "─" * _L + "┴" + "─" * _R + "┤")
+    print(f"  │  {'autre (a)  hors catalogue, gardé dans le jeu':<{pleine}}│")
+    print(f"  │  {'unknown (u / ?)  |  skip (s)  |  quit (q)':<{pleine}}│")
+    print("  └" + "─" * (_L + 1 + _R) + "┘\n")
 
 
 def _resolve(raw: str) -> str | None:
@@ -207,7 +227,7 @@ def main() -> None:
         description="Annotate wood plank JSON files with species information",
     )
     p.add_argument("files", nargs="*",
-                   help="JSON files to annotate (default: all in horizontal_samples/)")
+                   help="JSON files to annotate (default: all in annotateImages/)")
     p.add_argument("--samples-dir", default=str(SAMPLES_DIR),
                    help=f"Directory with wood_XXX.json files (default: {SAMPLES_DIR})")
     p.add_argument("--reset",  action="store_true",
@@ -228,7 +248,7 @@ def main() -> None:
     if args.files:
         json_paths = [Path(f) for f in args.files]
     else:
-        json_paths = sorted(samples_dir.glob("wood_*.json"))
+        json_paths = fichiers_annotation(samples_dir)
 
     if not json_paths:
         print(f"Aucun fichier JSON trouvé dans {samples_dir}")

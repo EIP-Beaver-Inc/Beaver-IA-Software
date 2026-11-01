@@ -50,6 +50,35 @@ else:
 
 
 @pytest.fixture(scope="session")
+def fenetre_logiciel():
+    """La fenêtre du logiciel, une seule pour toute la session.
+
+    Créer puis détruire une racine Tk — par taille, par module — suffit à
+    perdre `TCL_LIBRARY` sous Windows : la racine suivante ne retrouve plus
+    ``auto.tcl``, son test se saute tout seul, et une suite qui se saute ne
+    vérifie rien. Dix-sept tests d'interface sur trente-quatre disparaissaient
+    ainsi, et l'ordre d'exécution décidait lesquels.
+
+    Les tests la redimensionnent et changent de vue ; ils ne la détruisent pas.
+    """
+    if WORKSPACE is None:
+        pytest.skip("dépôt IA introuvable")
+    import tkinter as tk
+
+    from beaver.app import App
+    try:
+        app = App()
+    except tk.TclError as erreur:
+        pytest.skip(f"Tk indisponible : {erreur}")
+    app.attributes("-alpha", 0.0)
+    yield app
+    try:
+        app._quitter()
+    except tk.TclError:
+        pass
+
+
+@pytest.fixture(scope="session")
 def blank_frame():
     """Image BGR 640x480 vide — ne doit déclencher aucune détection."""
     return np.zeros((480, 640, 3), dtype=np.uint8)

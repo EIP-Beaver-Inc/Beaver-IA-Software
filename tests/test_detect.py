@@ -45,22 +45,49 @@ def test_bober_model_loads():
     assert len(outputs) == 1
 
 
+#: Les 9 classes historiques, dans l'ordre exact de la tête de détection.
+#: Un modèle suivant peut en ajouter après, jamais en déplacer.
+NEUF_PREMIERES = ["Blue_Stain", "Crack", "Dead_Knot", "Knot_missing",
+                  "Live_Knot", "Marrow", "Quartzity", "knot_with_crack",
+                  "resin"]
+
+
 @requires_bober
-def test_bober_has_expected_classes():
+def test_bober_garde_les_neuf_premieres_classes():
+    """Les classes peuvent s'ajouter à la fin, pas changer de place.
+
+    Le test exigeait l'égalité stricte avec ces neuf classes : il interdisait
+    donc exactement ce que le réentraînement de BOBER avait pour but de faire,
+    et BOBERv1.7 l'a mis en échec en arrivant avec quinze classes.
+
+    Il protégeait pourtant quelque chose de réel, qu'on garde : l'ordre des
+    indices. Un indice qui change de sens casse en silence la reprise des
+    poids d'une version sur la suivante, et désaligne tous les fichiers
+    d'étiquettes déjà écrits sur disque.
+    """
     import ast
 
     import onnxruntime as ort
     session = ort.InferenceSession(str(BOBER_MODEL), providers=["CPUExecutionProvider"])
     meta    = session.get_modelmeta().custom_metadata_map
     names   = ast.literal_eval(meta.get("names", "{}"))
-    expected = {"Blue_Stain", "Crack", "Dead_Knot", "Knot_missing",
-                "Live_Knot", "Marrow", "Quartzity", "knot_with_crack", "resin"}
-    assert set(names.values()) == expected, f"Unexpected classes: {set(names.values())}"
+    ordre   = [names[i] for i in sorted(names)]
+
+    assert ordre[:len(NEUF_PREMIERES)] == NEUF_PREMIERES, (
+        f"les neuf premières classes ont changé d'ordre : {ordre[:9]}")
+    assert len(set(ordre)) == len(ordre), f"classe en double : {ordre}"
 
 
 @requires_bober
 def test_bober_input_output_shapes():
-    """Model must accept [1,3,640,640] and output [1,300,6]."""
+    """Trois canaux en entrée, six colonnes en sortie.
+
+    Le côté de l'image n'est plus fixé à 640 : BOBERv1.7 est exporté à 1536,
+    et le pipeline lit la taille dans l'ONNX. Les six colonnes, elles, sont le
+    contrat — `_OrtBober` lit `x1,y1,x2,y2,conf,class_id`, donc une NMS
+    intégrée. Un export sans `nms=True` sort des prédictions brutes que ce
+    code interpréterait comme des milliers de fausses détections.
+    """
     import onnxruntime as ort
     session = ort.InferenceSession(str(BOBER_MODEL), providers=["CPUExecutionProvider"])
     inp     = session.get_inputs()[0]

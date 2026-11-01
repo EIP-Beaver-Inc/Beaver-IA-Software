@@ -20,8 +20,9 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from . import theme as T
 from . import workspace as W
-from .taches import (CATALOGUE, ESSENCES_FEUILLUS, ESSENCES_RESINEUX, Param,
-                     Tache, etat_projet)
+from .taches import (CATALOGUE, ESSENCE_AUTRE, ESSENCES_FEUILLUS,
+                     ESSENCES_RESINEUX, Param, Tache, defaut_de, dernier,
+                     etat_projet, famille)
 
 RACINE = Path(__file__).resolve().parent.parent
 LOGO = RACINE / "assets" / "beaver-logo.png"
@@ -40,6 +41,10 @@ class App(tk.Tk):
         self.proc: subprocess.Popen | None = None
         self.flux: queue.Queue[str] = queue.Queue()
         self.vues: dict[str, tk.Frame] = {}
+        #: Par vue de tâches : son formulaire, sa console, sa tâche choisie.
+        #: Les vues sont gardées en cache, mais `self.form` et `self.console`
+        #: ne pointaient que sur la dernière construite.
+        self.vue_etat: dict[str, dict] = {}
         self.nav: dict[str, tuple[tk.Frame, tk.Label]] = {}
         self.active = ""
         self.champs: dict[str, tk.Variable] = {}
@@ -217,6 +222,15 @@ class App(tk.Tk):
             self.vues[cle] = self._batir(cle)
         self.vues[cle].pack(fill=tk.BOTH, expand=True)
         self.active = cle
+        etat = self.vue_etat.get(cle)
+        if etat is not None:
+            # Sans ça : Données, puis Entraîner, puis retour sur Données, et
+            # cliquer une tâche remplissait le formulaire — invisible — de la
+            # vue Entraîner. L'écran restait sur « Choisissez une tâche », et
+            # le bouton « Lancer » créé avec lui était hors d'atteinte.
+            self.form = etat["form"]
+            self.console = etat["console"]
+            self.tache = etat["tache"]
         if cle == "accueil":
             self._rafraichir()
 
@@ -313,11 +327,11 @@ class App(tk.Tk):
         try:
             from annotation_tool import WoodDefectAnnotator
             self.annotateur = WoodDefectAnnotator(hote)
-            modele = self.ws / "BOBER/model/weights/BOBERv1.5.pt"
-            if modele.exists():
+            modele = dernier(self.ws, "BOBER/model/weights/BOBERv*.pt")
+            if modele is not None:
                 self.after(300,
                            lambda: self.annotateur.load_model(str(modele), 0.10))
-            dossier = self.ws / "BOBER" / "extracted"
+            dossier = self.ws / "BOBER" / "annotateImages"
             if dossier.is_dir():
                 self.after(600,
                            lambda: self.annotateur.load_folder_directly(str(dossier)))
@@ -337,22 +351,34 @@ class App(tk.Tk):
 
         info = tk.Frame(f, bg=T.ALERTE_BG)
         info.pack(fill=tk.X, padx=22, pady=(14, 0))
-        tk.Label(info, bg=T.ALERTE_BG, fg=T.ALERTE, font=self.f_petit,
-                 anchor="w", text="  Ne devinez pas : un mauvais label est pire "
-                 "qu'un label manquant. Utilisez Ignorer en cas de doute.").pack(
-            fill=tk.X, pady=7)
+        # Deux lignes plutôt qu'une longue : à 1100 px de large, une seule
+        # ligne de cette longueur se fait rogner par la droite sans rien dire.
+        tk.Frame(info, bg=T.ALERTE_BG, height=6).pack(fill=tk.X)
+        for ligne in ("Ne devinez pas : un mauvais label est pire qu'un label "
+                      "manquant. « autre » pour un bois qui n'est aucune de ces "
+                      "essences, Ignorer si vous hésitez entre deux.",
+                      "Une erreur se reprend avec « ← Précédente » : choisir "
+                      "de nouveau remplace l'essence enregistrée."):
+            tk.Label(info, bg=T.ALERTE_BG, fg=T.ALERTE, font=self.f_petit,
+                     anchor="w", text="  " + ligne).pack(fill=tk.X)
+        tk.Frame(info, bg=T.ALERTE_BG, height=6).pack(fill=tk.X)
 
         self.esp_canvas = tk.Canvas(f, bg="#20291F", highlightthickness=0)
         self.esp_canvas.pack(fill=tk.BOTH, expand=True, padx=22, pady=12)
 
         bas = tk.Frame(f, bg=T.CONTENT_BG)
         bas.pack(fill=tk.X, padx=22, pady=(0, 16))
-        for titre, liste, coul in (("Feuillus", ESSENCES_FEUILLUS, T.PRIMARY),
-                                   ("Résineux", ESSENCES_RESINEUX, T.PRIMARY_CLAIR)):
+        # La troisième rangée garde une couleur à part : « autre » n'est pas une
+        # essence de plus dans la liste, c'est la sortie de catalogue, et un
+        # bouton vert de la même teinte inviterait à le cliquer par défaut.
+        for titre, liste, coul in (
+                ("Feuillus", ESSENCES_FEUILLUS, T.PRIMARY),
+                ("Résineux", ESSENCES_RESINEUX, T.PRIMARY_CLAIR),
+                ("Hors catalogue", [ESSENCE_AUTRE], T.TEXT_TERTIAIRE)):
             bloc = tk.Frame(bas, bg=T.CONTENT_BG)
             bloc.pack(fill=tk.X, pady=3)
             tk.Label(bloc, text=titre.upper(), bg=T.CONTENT_BG,
-                     fg=T.TEXT_TERTIAIRE, font=self.f_micro, width=10,
+                     fg=T.TEXT_TERTIAIRE, font=self.f_micro, width=14,
                      anchor="w").pack(side=tk.LEFT)
             for sp in liste:
                 tk.Button(bloc, text=sp, bg=coul, fg="white", relief=tk.FLAT,
@@ -362,6 +388,12 @@ class App(tk.Tk):
                     side=tk.LEFT, padx=3)
         act = tk.Frame(bas, bg=T.CONTENT_BG)
         act.pack(fill=tk.X, pady=(10, 0))
+        self.esp_retour = tk.Button(
+            act, text="← Précédente", command=self._esp_precedent,
+            bg=T.CARD_BG, fg=T.TEXT_MAIN, relief=tk.FLAT, padx=16, pady=7,
+            cursor="hand2", font=self.f_petit, state=tk.DISABLED,
+            disabledforeground=T.TEXT_TERTIAIRE)
+        self.esp_retour.pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(act, text="Ignorer", command=lambda: self._esp_choisir(None),
                   bg=T.CARD_BG, fg=T.TEXT_MAIN, relief=tk.FLAT, padx=16,
                   pady=7, cursor="hand2", font=self.f_petit).pack(side=tk.LEFT)
@@ -377,7 +409,7 @@ class App(tk.Tk):
         self.esp_compteur.pack(side=tk.RIGHT)
 
         self.after(250, lambda: self._esp_charger(
-            self.ws / "BOBER" / "horizontal_samples"))
+            self.ws / "BOBER" / "annotateImages"))
         return f
 
     def _esp_charger(self, dossier=None):
@@ -394,27 +426,45 @@ class App(tk.Tk):
         self.esp_index = -1
         self._esp_suivant()
 
+    def _esp_lire(self, fichier: Path) -> dict | None:
+        try:
+            return json.loads(fichier.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _esp_image(fichier: Path) -> Path | None:
+        return next((fichier.with_suffix(e)
+                     for e in (".jpg", ".jpeg", ".png", ".bmp")
+                     if fichier.with_suffix(e).exists()), None)
+
+    def _esp_poser(self, index: int, d: dict) -> bool:
+        """Affiche la planche d'`index`. Faux si elle n'est pas affichable.
+
+        Commun aux deux sens de navigation : en avant on ne vient ici que pour
+        les planches sans essence, en arrière pour n'importe laquelle — d'où
+        l'étiquette courante, qui dit ce qu'on est en train de remplacer.
+        """
+        image = self._esp_image(self.esp_fichiers[index])
+        if image is None:
+            return False
+        self.esp_index = index
+        self._esp_afficher(image)
+        deja = d.get("species")
+        self.esp_info.config(
+            text=image.name + (f"   —   annotée : {deja}" if deja else ""))
+        self._esp_compter()
+        self._esp_etat_retour()
+        return True
+
     def _esp_suivant(self):
-        self.esp_index += 1
-        while self.esp_index < len(self.esp_fichiers):
-            f = self.esp_fichiers[self.esp_index]
-            try:
-                d = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                self.esp_index += 1
-                continue
-            if d.get("species"):
-                self.esp_index += 1
-                continue
-            img = next((f.with_suffix(e) for e in (".jpg", ".jpeg", ".png", ".bmp")
-                        if f.with_suffix(e).exists()), None)
-            if img is None:
-                self.esp_index += 1
-                continue
-            self._esp_afficher(img)
-            self.esp_info.config(text=img.name)
-            self._esp_compter()
-            return
+        i = self.esp_index + 1
+        while i < len(self.esp_fichiers):
+            d = self._esp_lire(self.esp_fichiers[i])
+            if d is not None and not d.get("species") and self._esp_poser(i, d):
+                return
+            i += 1
+        self.esp_index = len(self.esp_fichiers)
         self.esp_canvas.delete("all")
         self.esp_canvas.create_text(
             max(self.esp_canvas.winfo_width() // 2, 300), 180,
@@ -422,6 +472,43 @@ class App(tk.Tk):
             fill="white", font=self.f_section)
         self.esp_info.config(text="")
         self._esp_compter()
+        self._esp_etat_retour()
+
+    def _esp_precedent(self):
+        """Revient sur la planche précédente, même déjà annotée.
+
+        Un clic parti trop vite était définitif : `_esp_suivant` saute toute
+        planche qui porte une essence, donc celle qu'on venait de rater
+        devenait inatteignable depuis le logiciel — il fallait ouvrir le JSON
+        à la main ou relancer la ligne de commande avec `--reset`. Ici on
+        recule sans ce filtre, et choisir de nouveau écrase le label.
+        """
+        i = min(self.esp_index, len(self.esp_fichiers)) - 1
+        while i >= 0:
+            d = self._esp_lire(self.esp_fichiers[i])
+            if d is not None and self._esp_poser(i, d):
+                return
+            i -= 1
+        # Rien d'affichable derrière : le bouton se retire de lui-même plutôt
+        # que de rester actif sur un clic sans effet.
+        self.esp_retour.config(state=tk.DISABLED)
+
+    def _esp_voisine(self, depart: int) -> bool:
+        """Affiche la première planche affichable à partir de `depart`.
+
+        Sans filtrer sur l'essence, contrairement à `_esp_suivant` : une fois
+        revenu en arrière pour corriger, on relit le dossier dans l'ordre, et
+        non par bonds vers la prochaine planche vierge à l'autre bout.
+        """
+        for i in range(depart, len(self.esp_fichiers)):
+            d = self._esp_lire(self.esp_fichiers[i])
+            if d is not None and self._esp_poser(i, d):
+                return True
+        return False
+
+    def _esp_etat_retour(self):
+        self.esp_retour.config(
+            state=tk.NORMAL if self.esp_index > 0 else tk.DISABLED)
 
     def _esp_compter(self):
         fait = 0
@@ -449,18 +536,27 @@ class App(tk.Tk):
     def _esp_choisir(self, essence: str | None):
         if self.esp_index >= len(self.esp_fichiers):
             return
+        f = self.esp_fichiers[self.esp_index]
+        d = self._esp_lire(f)
+        if d is None:
+            messagebox.showerror("Erreur", f"{f.name} est illisible.")
+            return
+        # Relue avant écriture : une planche déjà annotée veut dire qu'on est
+        # en train de relire le dossier, pas de l'annoter. On avance alors
+        # d'une planche au lieu de sauter à la prochaine vierge, qui peut être
+        # à des centaines de fichiers de là.
+        revue = d.get("species") is not None
         if essence is not None:
-            f = self.esp_fichiers[self.esp_index]
+            d["species"] = essence
+            d["wood_family"] = famille(essence)
             try:
-                d = json.loads(f.read_text(encoding="utf-8"))
-                d["species"] = essence
-                d["wood_family"] = ("feuillu" if essence in ESSENCES_FEUILLUS
-                                    else "resineux")
                 f.write_text(json.dumps(d, indent=2, ensure_ascii=False),
                              encoding="utf-8")
-            except (OSError, json.JSONDecodeError) as exc:
+            except OSError as exc:
                 messagebox.showerror("Erreur", str(exc))
                 return
+        if revue and self._esp_voisine(self.esp_index + 1):
+            return
         self._esp_suivant()
 
     # ---- tâches : formulaire + console intégrée ----------------------------
@@ -515,6 +611,71 @@ class App(tk.Tk):
                      lambda _e: [volet.unbind_all(s) for s in roulettes])
         return dedans
 
+    def _form_defilant(self, parent: tk.Frame) -> tk.Frame:
+        """Le formulaire de tâche, qui défile quand il ne tient pas.
+
+        Il était posé à sa hauteur naturelle. Dès qu'il dépassait, `pack`
+        écrasait la console puis rognait le formulaire par le bas sans rien
+        dire — bouton « Lancer » compris. « Entraîner le détecteur de
+        défauts » n'était plus qu'à 31 pixels de la limite à 1100×700 : un
+        réglage de plus et le bouton disparaissait.
+
+        On lui donne donc un plafond, pour que la console garde sa place, et
+        une barre qui ne paraît que si elle sert.
+        """
+        cadre = tk.Frame(parent, bg=T.CONTENT_BG)
+        cadre.pack(fill=tk.X)
+
+        barre = tk.Scrollbar(cadre, orient=tk.VERTICAL)
+        volet = tk.Canvas(cadre, bg=T.CONTENT_BG, highlightthickness=0,
+                          yscrollcommand=barre.set)
+        barre.config(command=volet.yview)
+        volet.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        form = tk.Frame(volet, bg=T.CARD_BG, highlightthickness=1,
+                        highlightbackground=T.CARD_BORDURE)
+        fenetre = volet.create_window((0, 0), window=form, anchor="nw")
+
+        def ajuster(_e=None):
+            voulu = form.winfo_reqheight()
+            plafond = max(int(parent.winfo_height() * 0.62), 180)
+            volet.configure(height=min(voulu, plafond))
+            volet.configure(scrollregion=(0, 0, volet.winfo_width(), voulu))
+            volet.itemconfigure(fenetre, width=volet.winfo_width())
+            if voulu > plafond:
+                if not barre.winfo_ismapped():
+                    barre.pack(side=tk.RIGHT, fill=tk.Y, before=volet)
+            elif barre.winfo_ismapped():
+                barre.pack_forget()
+                volet.yview_moveto(0.0)
+
+        form.bind("<Configure>", ajuster)
+        volet.bind("<Configure>", ajuster)
+        parent.bind("<Configure>", ajuster)
+
+        # Changer de tâche remplace le contenu du formulaire sans changer la
+        # taille du cadre lui-même : aucun <Configure> ne part, et `ajuster`
+        # ne tourne pas. Hauteur et `scrollregion` restaient donc celles de la
+        # tâche précédente — en passant d'un long formulaire défilé vers le bas
+        # à un court, le court se retrouvait au-dessus de la zone visible,
+        # bouton « Lancer » compris. `_choisir_tache` appelle donc ce rappel.
+        form.ajuster = ajuster
+
+        def molette(e):
+            if form.winfo_reqheight() > volet.winfo_height():
+                volet.yview_scroll(
+                    1 if getattr(e, "num", 0) == 5 or e.delta < 0 else -1,
+                    "units")
+
+        # Comme pour la colonne de gauche : la molette n'est captée que sous
+        # le pointeur, pour que la console garde la sienne.
+        roulettes = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+        cadre.bind("<Enter>",
+                   lambda _e: [volet.bind_all(s, molette) for s in roulettes])
+        cadre.bind("<Leave>",
+                   lambda _e: [volet.unbind_all(s) for s in roulettes])
+        return form
+
     def _vue_taches(self, domaine: str) -> tk.Frame:
         titres = {"roi": ("Localisation de la planche",
                           "Annoter les coins, tester le modèle ROI"),
@@ -544,9 +705,7 @@ class App(tk.Tk):
 
         droite = tk.Frame(corps, bg=T.CONTENT_BG)
         droite.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.form = tk.Frame(droite, bg=T.CARD_BG, highlightthickness=1,
-                             highlightbackground=T.CARD_BORDURE)
-        self.form.pack(fill=tk.X)
+        self.form = self._form_defilant(droite)
         tk.Label(self.form, text="Choisissez une tâche à gauche.",
                  bg=T.CARD_BG, fg=T.TEXT_TERTIAIRE, font=self.f_corps).pack(
             padx=20, pady=26)
@@ -562,10 +721,17 @@ class App(tk.Tk):
         sb.config(command=self.console.yview)
         self.console.tag_config("err", foreground=T.CONSOLE_ERR)
         self.console.tag_config("info", foreground=T.CONSOLE_INFO)
+        self.vue_etat[domaine] = {"form": self.form, "console": self.console,
+                                  "tache": None}
         return f
 
     def _choisir_tache(self, t: Tache):
         self.tache = t
+        if self.active in self.vue_etat:
+            # Mémorisée par vue : sinon « Lancer » depuis Données lançait la
+            # tâche choisie entre-temps dans Entraîner, celle qu'affiche le
+            # formulaire n'ayant plus rien à voir avec `self.tache`.
+            self.vue_etat[self.active]["tache"] = t
         self.champs.clear()
         for w in self.form.winfo_children():
             w.destroy()
@@ -614,9 +780,20 @@ class App(tk.Tk):
                                   state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=9)
 
+        # Le nouveau formulaire n'a pas la hauteur de l'ancien, et on le lit
+        # depuis le haut.
+        ajuster = getattr(self.form, "ajuster", None)
+        if ajuster is not None:
+            self.update_idletasks()
+            ajuster()
+            self.form.master.yview_moveto(0.0)
+
     def _champ(self, parent, p: Param, ligne: int, memo: dict) -> int:
         cle = p.flag or "_pos"
-        val = memo.get(cle, p.defaut)
+        # Le defaut d'un champ modele est resolu ici, pas ecrit dans le
+        # catalogue : il depend de l'espace de travail et de ce qui s'y
+        # trouve. Les vues Analyse et ROI proposaient encore BOBERv1.5.
+        val = memo.get(cle, defaut_de(p, self.ws))
         tk.Label(parent, text=p.label, bg=T.CARD_BG, fg=T.TEXT_MAIN,
                  font=self.f_petit, anchor="w").grid(
             row=ligne, column=0, sticky="w", pady=4, padx=(0, 12))
