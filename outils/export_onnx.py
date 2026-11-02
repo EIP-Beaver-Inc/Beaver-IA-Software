@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -111,8 +112,13 @@ def main() -> int:
         epilog=__doc__)
     p.add_argument("--model", required=True,
                    help="le .pt à exporter (chemin relatif à l'espace de travail)")
-    p.add_argument("--imgsz", type=int, default=None,
-                   help="défaut : la taille d'entraînement lue dans le .pt")
+    p.add_argument("--imgsz", default=None,
+                   help="défaut : la taille d'entraînement lue dans le .pt. "
+                        "Accepte aussi « hauteurxlargeur », par exemple "
+                        "832x1536 : une planche n'est pas carrée, et une toile "
+                        "carrée fait calculer du gris. À échelle de défaut "
+                        "identique, 832x1536 va 2,8 fois plus vite que "
+                        "1536x1536.")
     p.add_argument("--output", default=None,
                    help="défaut : le .onnx frère du .pt")
     p.add_argument("--opset", type=int, default=None)
@@ -126,7 +132,23 @@ def main() -> int:
         return 1
 
     apprise = taille_apprise(poids)
-    imgsz = args.imgsz or apprise or 640
+    if args.imgsz:
+        try:
+            imgsz = ([int(v) for v in args.imgsz.lower().split("x")]
+                     if "x" in args.imgsz.lower() else int(args.imgsz))
+        except ValueError:
+            print(f"--imgsz illisible : {args.imgsz!r}. Attendu 1536 ou 832x1536.")
+            return 1
+        if isinstance(imgsz, list) and len(imgsz) != 2:
+            print(f"--imgsz illisible : {args.imgsz!r}. Attendu 1536 ou 832x1536.")
+            return 1
+        cotes = imgsz if isinstance(imgsz, list) else [imgsz]
+        if any(c % 32 for c in cotes):
+            print(f"--imgsz : {args.imgsz} — chaque côté doit être un multiple "
+                  f"de 32, le réseau divise la taille par 32.")
+            return 1
+    else:
+        imgsz = apprise or 640
     sortie = absolu(args.output) if args.output else poids.with_suffix(".onnx")
 
     print(f"\n{'=' * W}")
@@ -134,14 +156,24 @@ def main() -> int:
     print(f"{'=' * W}")
     print(f"  Source   : {poids}")
     print(f"  Sortie   : {sortie}")
-    if args.imgsz and apprise and args.imgsz != apprise:
-        print(f"  Image    : {imgsz} px  — ATTENTION, entraîné à {apprise} px.")
-        print("             Le modèle verra les défauts à une autre échelle")
-        print("             que celle qu'il a apprise.")
+    # Ce qui fixe la taille d'un défaut en pixels est le **côté long** : le
+    # recadrage est mis à l'échelle par min(L/largeur, H/hauteur), et sur une
+    # planche couchée c'est la largeur qui lie. Un export 832x1536 garde donc
+    # exactement l'échelle d'un 1536x1536, en calculant deux fois moins.
+    rect = isinstance(imgsz, list)
+    cote_long = max(imgsz) if rect else imgsz
+    texte = f"{imgsz[0]}x{imgsz[1]}" if rect else f"{imgsz}"
+    if apprise and cote_long != apprise:
+        print(f"  Image    : {texte} px  — ATTENTION, entraîné à {apprise} px.")
+        print("             Le côté long change : le modèle verra les défauts")
+        print("             à une autre échelle que celle qu'il a apprise.")
+    elif rect:
+        print(f"  Image    : {texte} px  (côté long {cote_long}, celui de")
+        print("             l'entraînement — échelle des défauts inchangée)")
     elif apprise:
-        print(f"  Image    : {imgsz} px  (taille d'entraînement du .pt)")
+        print(f"  Image    : {texte} px  (taille d'entraînement du .pt)")
     else:
-        print(f"  Image    : {imgsz} px  (taille d'entraînement illisible)")
+        print(f"  Image    : {texte} px  (taille d'entraînement illisible)")
     print(f"{'=' * W}\n")
 
     if sortie.exists() and not args.force:
@@ -154,13 +186,20 @@ def main() -> int:
         print("ultralytics absent : python -m pip install ultralytics")
         return 1
 
-    produit = Path(YOLO(str(poids)).export(
-        format="onnx", imgsz=imgsz, nms=True, opset=args.opset, dynamic=False))
-
-    sortie.parent.mkdir(parents=True, exist_ok=True)
-    if produit.resolve() != sortie.resolve():
+    # Ultralytics écrit toujours à côté du .pt source, sous le même nom. Un
+    # export de BOBERv1.7.pt vers un autre chemin **écrase donc d'abord**
+    # BOBERv1.7.onnx, et le déplacement qui suit l'efface. C'est arrivé : le
+    # modèle en service a disparu pendant un simple banc d'essai, et seule une
+    # copie faite ailleurs a permis de le remettre. On exporte depuis une
+    # copie, dans un dossier temporaire, où il n'y a rien à détruire.
+    with tempfile.TemporaryDirectory() as tmp:
+        copie = Path(tmp) / poids.name
+        copie.write_bytes(poids.read_bytes())
+        produit = Path(YOLO(str(copie)).export(
+            format="onnx", imgsz=imgsz, nms=True, opset=args.opset,
+            dynamic=False))
+        sortie.parent.mkdir(parents=True, exist_ok=True)
         sortie.write_bytes(produit.read_bytes())
-        produit.unlink()
 
     griefs = controler(sortie)
     if griefs:

@@ -50,21 +50,29 @@ def _load_session(model_path: str) -> tuple[ort.InferenceSession, dict, int]:
         meta       = session.get_modelmeta().custom_metadata_map
         names      = ast.literal_eval(meta.get("names", "{}"))
         shape      = session.get_inputs()[0].shape
-        img_size   = shape[2] if isinstance(shape[2], int) else 640
-        _session_cache[model_path] = (session, names, img_size)
+        # Hauteur ET largeur : l'export n'est plus forcément carré. Une
+        # planche occupe 46 % d'une toile carrée, le reste est du gris calculé
+        # pour rien ; un export 768x1536 va deux fois plus vite et mesure une
+        # mAP supérieure. Ne lire que la hauteur ferait envoyer une toile
+        # 768x768 à un modèle qui en attend 1536 de large — ici onnxruntime
+        # refuse, ce qui vaut mieux que de deviner.
+        in_h       = shape[2] if isinstance(shape[2], int) else 640
+        in_w       = shape[3] if isinstance(shape[3], int) else in_h
+        _session_cache[model_path] = (session, names, (in_h, in_w))
     return _session_cache[model_path]
 
 
 def _run_onnx(session: ort.InferenceSession, image: np.ndarray,
-              img_size: int, confidence: float) -> list[dict]:
+              img_size: "int | tuple[int, int]", confidence: float) -> list[dict]:
     """Run inference, returning detections in image coords. The image is
     letterboxed: a plain resize deforms shapes and the model misreads them."""
+    in_h, in_w = img_size if isinstance(img_size, tuple) else (img_size, img_size)
     h0, w0 = image.shape[:2]
-    r      = min(img_size / w0, img_size / h0)
+    r      = min(in_w / w0, in_h / h0)
     nw, nh = int(round(w0 * r)), int(round(h0 * r))
     rgb    = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    canvas = np.full((img_size, img_size, 3), 114, dtype=np.uint8)
-    left, top = (img_size - nw) // 2, (img_size - nh) // 2
+    canvas = np.full((in_h, in_w, 3), 114, dtype=np.uint8)
+    left, top = (in_w - nw) // 2, (in_h - nh) // 2
     canvas[top:top + nh, left:left + nw] = cv2.resize(
         rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
     inp = canvas.astype(np.float32) / 255.0
