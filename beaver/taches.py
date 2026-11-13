@@ -318,11 +318,22 @@ CATALOGUE: dict[str, list[Tache]] = {
                      "", "choix", ("", "B", "S", "F", "P", "D")),
                Param("--essence", "Essence déclarée",
                      "sur une ligne mono-essence, évite d'attendre le classifieur",
-                     "", "choix", ("", "chene", "hetre")),
-               Param("--plank-width-mm", "Largeur réelle (mm)", "petit axe, fixe l'échelle", ""),
+                     "chene", "choix", ("", "chene", "hetre")),
+               # L'échelle vient de la distance caméra–planche : c'est elle qui
+               # donne la largeur. Le fichier par défaut correspond aux vidéos
+               # d'essai de FactoryShot (iPhone 15, planche à 2,5 m).
+               Param("--etalonnage", "Étalonnage caméra",
+                     "focale + distance caméra–planche ; donne l'échelle et la largeur",
+                     "etalonnage/videos_essai_iphone15.json", "fichier"),
+               Param("--epaisseur-mm", "Épaisseur (mm)",
+                     "si l'étalonnage mesure jusqu'au tapis et non jusqu'à la face", ""),
+               Param("--plank-width-mm", "Largeur déclarée (mm)",
+                     "seulement sans étalonnage — l'étalonnage est prioritaire", ""),
                Param("--faces-observed", "Faces imagées", "", "1"),
+               Param("--journal", "Journal pour la revue",
+                     "indispensable pour « Revoir une analyse »", "1", "drapeau"),
                Param("--bober-model", "Modèle défauts", "le plus récent sur disque",
-                     "BOBER/model/weights/BOBERv1.5.onnx", "fichier",
+                     "BOBER/model/weights/BOBERv1.7.onnx", "fichier",
                      motif="BOBER/model/weights/BOBERv*.onnx"),
                # Le champ n'existait pas, et le défaut du script est
                # « ROI/checkpoints/best.pt », qui n'existe sur aucun disque :
@@ -346,8 +357,54 @@ CATALOGUE: dict[str, list[Tache]] = {
                      "une vignette par candidat, retenu ou écarté", "",
                      "drapeau")],
               positionnel=Param("", "Vidéo", "0 pour la webcam", "", "fichier"),
-              note="Sans échelle la note n'est pas posée. L'essence peut être "
-                   "déclarée plutôt que reconnue si la ligne ne traite qu'un bois."),
+              note="Sans échelle la note n'est pas posée, et sans produit elle "
+                   "n'est pas demandée. Chaque planche donne plank_XXXX.json "
+                   "(format beaver.planche/1 : défauts retenus, écartés et "
+                   "note) et, avec le journal, de quoi la revoir sans IA dans "
+                   "« Revoir une analyse »."),
+        Tache("revoir", "Revoir une analyse",
+              "Rejoue la vidéo SANS IA, avec par-dessus les défauts que le "
+              "rapport a retenus, au moment où ils passent. Pour vérifier à "
+              "l'œil ce qui a été gardé, et ce qui a été écarté.",
+              "outils/revoir_analyse.py",
+              [Param("--rapports", "Rapports", "le dossier de sortie de l'analyse",
+                     "plank_reports", "dossier"),
+               Param("--ecartees", "Montrer les écartées",
+                     "en gris, avec la raison — touche e", "", "drapeau"),
+               Param("--brutes", "Montrer les détections brutes",
+                     "tout ce que le modèle a vu — touche d", "", "drapeau"),
+               Param("--sortie", "Vidéo de revue",
+                     "vide = fenêtre interactive ; sinon un .mp4 à partager",
+                     "", "fichier")],
+              positionnel=Param("", "Vidéo", "la même que celle analysée", "", "fichier"),
+              fenetre_propre=True,
+              note="L'analyse doit avoir été lancée avec « Journal pour la "
+                   "revue ». Trait épais : vu sur cette image ; trait fin : "
+                   "dans le champ mais pas détecté ici. Touches : espace pause, "
+                   "n / p image par image, e écartées, d brutes, + / - vitesse, "
+                   "q quitter."),
+        Tache("rejouer", "Rejouer l'interprétation",
+              "Refait l'interprétation et la note à partir des journaux, sans "
+              "vidéo ni modèle : pour régler les seuils de "
+              "interpretation/regles.yaml avec un classeur et voir aussitôt ce "
+              "qui change.",
+              "outils/rejouer_journal.py",
+              [Param("--produit", "Produit", "", "S", "choix", ("", "B", "S", "F", "P", "D")),
+               Param("--essence", "Essence", "", "chene", "choix", ("chene", "hetre")),
+               Param("--etalonnage", "Étalonnage caméra", "",
+                     "etalonnage/videos_essai_iphone15.json", "fichier"),
+               Param("--epaisseur-mm", "Épaisseur (mm)", "", ""),
+               Param("--plank-width-mm", "Largeur déclarée (mm)",
+                     "seulement sans étalonnage", ""),
+               Param("--faces", "Faces imagées", "", "1"),
+               Param("--regles", "Règles d'interprétation",
+                     "vide = interpretation/regles.yaml", "", "fichier"),
+               Param("--detail", "Lister les écartées", "avec leur raison", "", "drapeau"),
+               Param("--sortie", "Écrire les rapports rejoués",
+                     "vide = affichage seul", "", "dossier")],
+              positionnel=Param("", "Journaux",
+                                "un dossier de sortie d'analyse, ou des *_journal.json",
+                                "plank_reports", "dossier")),
         Tache("classer", "Classer des rapports",
               "Applique EN 975-1 à des rapports déjà produits, sans refaire "
               "l'analyse vidéo.",

@@ -9,3 +9,8 @@ venv/
 Thumbs.db
 .ruff_cache/
 .pytest_cache/
+
+# Dossiers temporaires de pytest et de torch.compile, créés dans le dépôt
+# quand TMP pointe dessus
+pytest-of-*/
+torchinductor_*/
